@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+yfinance
+python-dotenv>=1.0.0
+matplotlib
+streamlit-aggrid
