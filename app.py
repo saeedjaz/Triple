@@ -129,7 +129,7 @@ def is_expired(expiry_date: str) -> bool:
 
 @st.cache_data(ttl=300)
 def fetch_data(symbols, sd, ed, iv):
-    """تنزيل بيانات من yfinance. حارس للمدخلات لتجنّب مكالمات فارغة."""
+    """تنزيل بيانات من yfinance لدفعة واحدة."""
     if not symbols or not str(symbols).strip():
         return None
     try:
@@ -147,35 +147,29 @@ def fetch_data(symbols, sd, ed, iv):
         st.error(f"خطأ في تحميل البيانات: {e}")
         return None
 
-@st.cache_data(ttl=300)
-def fetch_data_batched(symbols_str: str, sd, ed, iv, batch_size: int = 60):
-    """تنزيل مجزّأ لتفادي حدود عدد الرموز."""
-    syms = [s for s in symbols_str.split() if s.strip()]
-    if not syms:
+def extract_symbol_df(batch_df: pd.DataFrame, code: str) -> pd.DataFrame | None:
+    """
+    استخراج DataFrame لرمز محدد من نتيجة yfinance سواءً كانت MultiIndex (عدة رموز)
+    أو DataFrame أعمدة مسطّحة (رمز واحد).
+    """
+    if batch_df is None or batch_df.empty:
         return None
-    frames = []
-    for i in range(0, len(syms), batch_size):
-        chunk = " ".join(syms[i:i + batch_size])
-        try:
-            df = yf.download(
-                tickers=chunk,
-                start=sd,
-                end=ed + timedelta(days=1),
-                interval=iv,
-                group_by="ticker",
-                auto_adjust=True,
-                progress=False,
-                threads=True,
-            )
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                frames.append(df)
-        except Exception:
-            continue
-    if not frames:
+    try:
+        if isinstance(batch_df.columns, pd.MultiIndex):
+            # نستخدم المستوى الأول كرموز
+            lvl0 = batch_df.columns.get_level_values(0)
+            if code in set(lvl0):
+                return batch_df[code].reset_index()
+            else:
+                return None
+        else:
+            # حالة رمز واحد: الأعمدة تكون Open/High/Low/Close.. مباشرة
+            cols = set(map(str.lower, batch_df.columns.astype(str)))
+            if {"open","high","low","close"}.issubset(cols):
+                return batch_df.reset_index()
+    except Exception:
         return None
-    combined = pd.concat(frames, axis=1)
-    combined = combined.sort_index(axis=1)
-    return combined
+    return None
 
 def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intraday_daily: bool = False) -> pd.DataFrame:
     """إسقاط الشمعة غير المكتملة (مع خيار السماح باليومي الحالي)."""
@@ -378,7 +372,7 @@ def generate_html_table(df: pd.DataFrame) -> str:
     for col in df.columns:
         html += f"<th>{escape(col)}</th>"
     html += "</tr></thead><tbody>"
-    status_cols = ["يومي", "أسبوعي", "شهري"]  # التلوين للكلاسيكي فقط
+    status_cols = ["يومي", "أسبوعي", "شهري"]
     for _, row in df.iterrows():
         html += "<tr>"
         for col in df.columns:
@@ -478,12 +472,14 @@ with st.sidebar:
 
     st.markdown("### ⚡ أبرز اختراقات الساعة في السوق الأمريكي")
     sample_symbols = """AAL AAPL ADBE ADI ADP ADSK AEP AKAM ALGN AMAT AMD AMGN AMZN ANSS APA AVGO AYRO BIDU BIIB BKNG BKR BMRN BNTX BYND CAR CDNS CDW CHKP CHRW CHTR CINF CLOV CMCSA CME COO COST CPB CPRT CSCO CSX CTAS CTSH DLTR DPZ DXCM EA EBAY ENPH EQIX ETSY EVRG EXC EXPE FANG FAST FFIV FITB FOX FOXA FSLR FTNT GEN GILD GOOG GOOGL GT HAS HBAN HOLX HON HSIC HST IDXX ILMN INCY INTC INTU IPGP ISRG JBHT JD JKHY KDP KHC KLAC LBTYA LBTYK LILA LILAK LIN LKQ LNT LRCX LULU MAR MAT MCHP MDLZ META MKTX MNST MSFT MU NAVI NDAQ NFLX NTAP NTES NTRS NVAX NVDA NWL NWS NWSA NXPI ODFL ORLY PARA PAYX PCAR PDCO PEP PFG POOL PYPL QCOM QQQ QRVO QVCGA REG REGN ROKU ROP ROST SBAC SBUX SIRI SNPS STX SWKS TCOM TER TMUS TRIP TRMB TROW TSCO TSLA TTD TTWO TXN UAL ULTA URBN VOD VRSK VRSN VRTX VTRS WBA WBD WDC WTW WYNN XEL XRAY XRX ZBRA ZION ZM""".split()
-    intraday_data = fetch_data_batched(" ".join(sample_symbols), date.today() - timedelta(days=5), date.today(), "60m")
+    intraday_data = fetch_data(" ".join(sample_symbols), date.today() - timedelta(days=5), date.today(), "60m")
     breakout_list = []
     if intraday_data is not None:
         for sym in sample_symbols:
             try:
-                df_sym = intraday_data[sym].reset_index()
+                df_sym = extract_symbol_df(intraday_data, sym)
+                if df_sym is None:
+                    continue
                 df_sym = detect_breakout_with_state(df_sym)
                 if not df_sym.empty and df_sym["FirstBuySig"].iat[-1]:
                     breakout_list.append(sym)
@@ -500,12 +496,15 @@ with st.sidebar:
     start_date = st.sidebar.date_input("من", date(2020, 1, 1))
     end_date = st.sidebar.date_input("إلى", date.today())
 
-    # خيار المعاينة المبكرة لليومي (لن يُستخدم في شروط الفلتر، لكنه يفيد للعرض لاحقًا إن رغبت)
     allow_intraday_daily = st.sidebar.checkbox(
         "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي) — للعرض فقط",
         value=False,
         help="الفلتر الأساسي يشترط إغلاق يومي مؤكد. هذا الخيار لا يؤثر على الفلترة، فقط على أي عرض اختياري.",
     )
+
+    # حجم الدُفعة عند الجلب (لجميع الرموز)
+    batch_size = st.sidebar.slider("حجم الدُفعة عند الجلب", min_value=20, max_value=120, value=60, step=10,
+                                   help="تكبيرها يسرّع الجلب ولكن قد يستهلك ذاكرة أكبر.")
 
     # تحميل قاموس الأسماء
     symbol_name_dict = (
@@ -535,11 +534,7 @@ with st.sidebar:
 symbols_input = st.text_area("أدخل الرموز (مفصولة بمسافة أو سطر)", st.session_state.get("symbols", ""))
 symbols = [s.strip() + suffix for s in symbols_input.replace("\n", " ").split() if s.strip()]
 
-# حدّ أعلى للرموز لضمان الأداء
-MAX_SYMBOLS = 80
-if len(symbols) > MAX_SYMBOLS:
-    st.warning(f"⚠️ تم إدخال {len(symbols)} رمزًا. سيتم تحليل أول {MAX_SYMBOLS} فقط لضمان الأداء.")
-    symbols = symbols[:MAX_SYMBOLS]
+# (ألغينا أي حد أقصى للرموز — سيتم تحليل الكل عبر دفعات)
 
 # =============================
 # تنفيذ التحليل
@@ -549,76 +544,87 @@ if st.button("🔎 تنفيذ التحليل"):
         st.warning("⚠️ الرجاء إدخال رموز أولًا.")
         st.stop()
 
-    with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر..."):
-        # مصدر واحد: اليومي (دائمًا مؤكد للتحكيم على الشرط اليومي بالإغلاق)
-        ddata = fetch_data_batched(" ".join(symbols), start_date, end_date, "1d")
-        if ddata is None:
-            st.error("⚠️ لم تتم تحميل بيانات السوق؛ يرجى المحاولة لاحقًا.")
-            st.stop()
-        if isinstance(ddata, pd.DataFrame) and ddata.empty:
-            st.info("ℹ️ البيانات فارغة للفترة/الأسواق المحددة.")
-            st.stop()
-
+    with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر لكل الرموز..."):
         results = []
-        for code in symbols:
-            try:
-                # يومي خام
-                df_d_raw = ddata[code].reset_index()
 
-                # يومي مؤكد فقط (لا نسمح بمعاينة مبكرة هنا)
-                df_d_conf = drop_last_if_incomplete(
-                    df_d_raw,
-                    "1d",
-                    suffix,
-                    allow_intraday_daily=False,
-                )
-                if df_d_conf is None or df_d_conf.empty:
-                    continue
+        total = len(symbols)
+        prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
+        processed = 0
 
-                # منطق 55% على اليومي المؤكد
-                df_d = detect_breakout_with_state(df_d_conf)
-                if df_d is None or df_d.empty:
-                    continue
-
-                # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية 55% (إغلاق يومي)
-                daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
-                if not daily_first_breakout:
-                    continue
-
-                # (2) شرط الأسبوعي: إيجابي
-                weekly_positive = weekly_state_from_daily(df_d_conf, suffix)
-                if not weekly_positive:
-                    continue
-
-                # (3) شرط الشهري: "أول اختراق فقط"
-                monthly_first_breakout = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                if not monthly_first_breakout:
-                    continue
-
-                # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
-                daily_positive = (df_d["State"].iat[-1] == 1)
-                last_close = float(df_d["Close"].iat[-1])
-
-                sym = code.replace(suffix, '').upper()
-                company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
-                tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
-                url = f"https://www.tradingview.com/symbols/{tv}/"
-
-                results.append(
-                    {
-                        "م": 0,
-                        "الرمز": sym,
-                        "اسم الشركة": company_name,
-                        "سعر الإغلاق": round(last_close, 2),
-                        "يومي": "إيجابي" if daily_positive else "سلبي",
-                        "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
-                        "شهري": "اختراق أول مرة" if monthly_first_breakout else "—",
-                        "رابط TradingView": url,
-                    }
-                )
-
-            except Exception:
+        # نجلب ونعالج على دفعات لتقليل استهلاك الذاكرة
+        for i in range(0, total, batch_size):
+            chunk_syms = symbols[i:i + batch_size]
+            ddata_chunk = fetch_data(" ".join(chunk_syms), start_date, end_date, "1d")
+            if ddata_chunk is None or (isinstance(ddata_chunk, pd.DataFrame) and ddata_chunk.empty):
+                # تحديث التقدّم حتى لو فشل الدفعة
+                processed += len(chunk_syms)
+                prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
                 continue
+
+            for code in chunk_syms:
+                try:
+                    # استخراج اليومي للرمز من الدفعة الحالية
+                    df_d_raw = extract_symbol_df(ddata_chunk, code)
+                    if df_d_raw is None or df_d_raw.empty:
+                        continue
+
+                    # يومي مؤكد فقط (لا نسمح بمعاينة مبكرة هنا لأنه شرط أساسي)
+                    df_d_conf = drop_last_if_incomplete(
+                        df_d_raw,
+                        "1d",
+                        suffix,
+                        allow_intraday_daily=False,
+                    )
+                    if df_d_conf is None or df_d_conf.empty:
+                        continue
+
+                    # منطق 55% على اليومي المؤكد
+                    df_d = detect_breakout_with_state(df_d_conf)
+                    if df_d is None or df_d.empty:
+                        continue
+
+                    # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية 55% (إغلاق يومي)
+                    daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
+                    if not daily_first_breakout:
+                        continue
+
+                    # (2) شرط الأسبوعي: إيجابي
+                    weekly_positive = weekly_state_from_daily(df_d_conf, suffix)
+                    if not weekly_positive:
+                        continue
+
+                    # (3) شرط الشهري: "أول اختراق فقط"
+                    monthly_first_breakout = monthly_first_breakout_from_daily(df_d_conf, suffix)
+                    if not monthly_first_breakout:
+                        continue
+
+                    # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
+                    daily_positive = (df_d["State"].iat[-1] == 1)
+                    last_close = float(df_d["Close"].iat[-1])
+
+                    sym = code.replace(suffix, '').upper()
+                    company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
+                    tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
+                    url = f"https://www.tradingview.com/symbols/{tv}/"
+
+                    results.append(
+                        {
+                            "م": 0,
+                            "الرمز": sym,
+                            "اسم الشركة": company_name,
+                            "سعر الإغلاق": round(last_close, 2),
+                            "يومي": "إيجابي" if daily_positive else "سلبي",
+                            "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
+                            "شهري": "اختراق أول مرة" if monthly_first_breakout else "—",
+                            "رابط TradingView": url,
+                        }
+                    )
+
+                except Exception:
+                    continue
+
+            processed += len(chunk_syms)
+            prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
 
         if results:
             df_results = pd.DataFrame(results)[
