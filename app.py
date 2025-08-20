@@ -8,12 +8,18 @@ import yfinance as yf
 from datetime import datetime, date, timedelta
 from html import escape
 from zoneinfo import ZoneInfo  # لضبط التوقيت المحلي
+import hashlib, secrets, base64  # تشفير كلمات المرور
 
 # =============================
 # تحميل متغيرات البيئة
 # =============================
 load_dotenv()
 SHEET_CSV_URL = os.getenv("SHEET_CSV_URL")
+
+# إيقاف آمن إذا لم يتم ضبط متغير البيئة
+if not SHEET_CSV_URL:
+    st.error("⚠️ لم يتم ضبط SHEET_CSV_URL في متغيرات البيئة. أضفه ثم أعد التشغيل.")
+    st.stop()
 
 # =============================
 # تهيئة الصفحة العامة + دعم RTL
@@ -76,6 +82,27 @@ def load_symbols_names(file_path: str, market_type: str) -> dict:
         st.warning(f"⚠️ خطأ في تحميل ملف {file_path}: {e}")
         return {}
 
+# ===== تشفير كلمات المرور (PBKDF2) =====
+PBKDF_ITER = 100_000
+
+def _pbkdf2_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF_ITER)
+    return f"pbkdf2$sha256${PBKDF_ITER}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+
+def _pbkdf2_verify(password: str, stored: str) -> bool:
+    try:
+        algo, algoname, iters, b64salt, b64hash = stored.split("$", 4)
+        if algo != "pbkdf2" or algoname != "sha256":
+            return False
+        iters = int(iters)
+        salt = base64.b64decode(b64salt)
+        expected = base64.b64decode(b64hash)
+        test = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
+        return secrets.compare_digest(test, expected)
+    except Exception:
+        return False
+
 # ===== كاش لتحميل بيانات المستخدمين =====
 @st.cache_data(ttl=3600)
 def load_users():
@@ -83,7 +110,15 @@ def load_users():
     return df.to_dict("records")
 
 def check_login(username, password, users):
-    return next((u for u in users if u.get("username") == username and u.get("password") == password), None)
+    for u in users:
+        if u.get("username") == username:
+            pwd_hash = u.get("password_hash")
+            if pwd_hash:  # المسار الآمن
+                return u if _pbkdf2_verify(password, pwd_hash) else None
+            # توافق خلفي مع العمود القديم
+            if u.get("password") == password:
+                return u
+    return None
 
 def is_expired(expiry_date: str) -> bool:
     try:
@@ -112,11 +147,46 @@ def fetch_data(symbols, sd, ed, iv):
         st.error(f"خطأ في تحميل البيانات: {e}")
         return None
 
+@st.cache_data(ttl=300)
+def fetch_data_batched(symbols_str: str, sd, ed, iv, batch_size: int = 60):
+    """تنزيل مجزّأ لتفادي حدود عدد الرموز."""
+    syms = [s for s in symbols_str.split() if s.strip()]
+    if not syms:
+        return None
+    frames = []
+    for i in range(0, len(syms), batch_size):
+        chunk = " ".join(syms[i:i + batch_size])
+        try:
+            df = yf.download(
+                tickers=chunk,
+                start=sd,
+                end=ed + timedelta(days=1),
+                interval=iv,
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+    if not frames:
+        return None
+    combined = pd.concat(frames, axis=1)
+    combined = combined.sort_index(axis=1)
+    return combined
+
 def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intraday_daily: bool = False) -> pd.DataFrame:
     """إسقاط الشمعة غير المكتملة (مع خيار السماح باليومي الحالي)."""
     if df is None or df.empty:
         return df
     dfx = df.copy()
+
+    # لو كان آخر صف ناقص قيماً (OHLC) نحذفه
+    if dfx.iloc[-1][["Open","High","Low","Close"]].isna().any():
+        return dfx.iloc[:-1] if len(dfx) > 1 else dfx.iloc[0:0]
+
     last_dt = pd.to_datetime(dfx["Date"].iloc[-1]).date()
 
     if tf == "1d":
@@ -138,7 +208,6 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
         return dfx  # الأسبوعي يُفحص في التجميع من اليومي
 
     if tf == "1mo":
-        # لن نستخدم 1mo من مزوّد البيانات بعد الآن، لكن نترك الحارس إن استُخدم.
         now = datetime.now(ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York"))
         today = now.date()
         if last_dt.year == today.year and last_dt.month == today.month:
@@ -281,6 +350,16 @@ def monthly_state_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
     df_m = detect_breakout_with_state(df_m)
     return bool(df_m["State"].iat[-1] == 1)
 
+def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
+    """
+    True إذا كان آخر شمعه شهرية (المؤكدة) سجّلت أول اختراق (FirstBuySig) حسب منطق 55%.
+    """
+    df_m = resample_monthly_from_daily(df_daily, suffix)
+    if df_m is None or df_m.empty:
+        return False
+    df_m = detect_breakout_with_state(df_m)
+    return bool(df_m["FirstBuySig"].iat[-1])  # أول اختراق شهري (في هذه الدورة)
+
 def generate_html_table(df: pd.DataFrame) -> str:
     html = """
     <style>
@@ -299,7 +378,7 @@ def generate_html_table(df: pd.DataFrame) -> str:
     for col in df.columns:
         html += f"<th>{escape(col)}</th>"
     html += "</tr></thead><tbody>"
-    status_cols = ["يومي", "أسبوعي", "شهري"]
+    status_cols = ["يومي", "أسبوعي", "شهري"]  # التلوين للكلاسيكي فقط
     for _, row in df.iterrows():
         html += "<tr>"
         for col in df.columns:
@@ -399,7 +478,7 @@ with st.sidebar:
 
     st.markdown("### ⚡ أبرز اختراقات الساعة في السوق الأمريكي")
     sample_symbols = """AAL AAPL ADBE ADI ADP ADSK AEP AKAM ALGN AMAT AMD AMGN AMZN ANSS APA AVGO AYRO BIDU BIIB BKNG BKR BMRN BNTX BYND CAR CDNS CDW CHKP CHRW CHTR CINF CLOV CMCSA CME COO COST CPB CPRT CSCO CSX CTAS CTSH DLTR DPZ DXCM EA EBAY ENPH EQIX ETSY EVRG EXC EXPE FANG FAST FFIV FITB FOX FOXA FSLR FTNT GEN GILD GOOG GOOGL GT HAS HBAN HOLX HON HSIC HST IDXX ILMN INCY INTC INTU IPGP ISRG JBHT JD JKHY KDP KHC KLAC LBTYA LBTYK LILA LILAK LIN LKQ LNT LRCX LULU MAR MAT MCHP MDLZ META MKTX MNST MSFT MU NAVI NDAQ NFLX NTAP NTES NTRS NVAX NVDA NWL NWS NWSA NXPI ODFL ORLY PARA PAYX PCAR PDCO PEP PFG POOL PYPL QCOM QQQ QRVO QVCGA REG REGN ROKU ROP ROST SBAC SBUX SIRI SNPS STX SWKS TCOM TER TMUS TRIP TRMB TROW TSCO TSLA TTD TTWO TXN UAL ULTA URBN VOD VRSK VRSN VRTX VTRS WBA WBD WDC WTW WYNN XEL XRAY XRX ZBRA ZION ZM""".split()
-    intraday_data = fetch_data(" ".join(sample_symbols), date.today() - timedelta(days=5), date.today(), "60m")
+    intraday_data = fetch_data_batched(" ".join(sample_symbols), date.today() - timedelta(days=5), date.today(), "60m")
     breakout_list = []
     if intraday_data is not None:
         for sym in sample_symbols:
@@ -417,15 +496,15 @@ with st.sidebar:
     st.markdown("### ⚙️ إعدادات التحليل")
     market = st.sidebar.selectbox("اختر السوق", ["السوق السعودي", "السوق الأمريكي"])
     suffix = ".SR" if market == "السوق السعودي" else ""
-    interval = st.sidebar.selectbox("الفاصل الزمني", ["1d", "1wk", "1mo"])
+    interval = st.sidebar.selectbox("الفاصل الزمني (للعرض فقط)", ["1d", "1wk", "1mo"])
     start_date = st.sidebar.date_input("من", date(2020, 1, 1))
     end_date = st.sidebar.date_input("إلى", date.today())
 
-    # زر/خيار: عرض اختراقات اليوم دون انتظار إغلاق الشمعة
+    # خيار المعاينة المبكرة لليومي (لن يُستخدم في شروط الفلتر، لكنه يفيد للعرض لاحقًا إن رغبت)
     allow_intraday_daily = st.sidebar.checkbox(
-        "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي)",
+        "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي) — للعرض فقط",
         value=False,
-        help="اليومي فقط. الأسبوعي/الشهري مؤكدان دائمًا ويعاد تجميعهما من اليومي.",
+        help="الفلتر الأساسي يشترط إغلاق يومي مؤكد. هذا الخيار لا يؤثر على الفلترة، فقط على أي عرض اختياري.",
     )
 
     # تحميل قاموس الأسماء
@@ -456,6 +535,12 @@ with st.sidebar:
 symbols_input = st.text_area("أدخل الرموز (مفصولة بمسافة أو سطر)", st.session_state.get("symbols", ""))
 symbols = [s.strip() + suffix for s in symbols_input.replace("\n", " ").split() if s.strip()]
 
+# حدّ أعلى للرموز لضمان الأداء
+MAX_SYMBOLS = 80
+if len(symbols) > MAX_SYMBOLS:
+    st.warning(f"⚠️ تم إدخال {len(symbols)} رمزًا. سيتم تحليل أول {MAX_SYMBOLS} فقط لضمان الأداء.")
+    symbols = symbols[:MAX_SYMBOLS]
+
 # =============================
 # تنفيذ التحليل
 # =============================
@@ -464,94 +549,110 @@ if st.button("🔎 تنفيذ التحليل"):
         st.warning("⚠️ الرجاء إدخال رموز أولًا.")
         st.stop()
 
-    # مصدر واحد: اليومي
-    ddata = fetch_data(" ".join(symbols), start_date, end_date, "1d")
-    if ddata is None:
-        st.error("⚠️ لم تتم تحميل بيانات السوق؛ يرجى المحاولة لاحقًا.")
-        st.stop()
-    if isinstance(ddata, pd.DataFrame) and ddata.empty:
-        st.info("ℹ️ البيانات فارغة للفترة/الأسواق المحددة.")
-        st.stop()
+    with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر..."):
+        # مصدر واحد: اليومي (دائمًا مؤكد للتحكيم على الشرط اليومي بالإغلاق)
+        ddata = fetch_data_batched(" ".join(symbols), start_date, end_date, "1d")
+        if ddata is None:
+            st.error("⚠️ لم تتم تحميل بيانات السوق؛ يرجى المحاولة لاحقًا.")
+            st.stop()
+        if isinstance(ddata, pd.DataFrame) and ddata.empty:
+            st.info("ℹ️ البيانات فارغة للفترة/الأسواق المحددة.")
+            st.stop()
 
-    # لو احتاج المستخدم عرض اليومي نفسه، نحمّل أيضًا data_sel لليومي (اختياري)
-    data_sel = ddata if interval == "1d" else None
+        results = []
+        for code in symbols:
+            try:
+                # يومي خام
+                df_d_raw = ddata[code].reset_index()
 
-    results = []
-    for code in symbols:
-        try:
-            # --- 1) تجهيز داتا الفاصل المختار من اليومي المؤكَّد ---
-            df_d_raw = ddata[code].reset_index()             # يومي خام
-            if interval == "1wk":
-                df_sel = resample_weekly_from_daily(df_d_raw, suffix)
-            elif interval == "1mo":
-                df_sel = resample_monthly_from_daily(df_d_raw, suffix)
-            else:
-                df_sel = drop_last_if_incomplete(
+                # يومي مؤكد فقط (لا نسمح بمعاينة مبكرة هنا)
+                df_d_conf = drop_last_if_incomplete(
                     df_d_raw,
                     "1d",
                     suffix,
-                    allow_intraday_daily=allow_intraday_daily,   # فقط لليومي
+                    allow_intraday_daily=False,
+                )
+                if df_d_conf is None or df_d_conf.empty:
+                    continue
+
+                # منطق 55% على اليومي المؤكد
+                df_d = detect_breakout_with_state(df_d_conf)
+                if df_d is None or df_d.empty:
+                    continue
+
+                # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية 55% (إغلاق يومي)
+                daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
+                if not daily_first_breakout:
+                    continue
+
+                # (2) شرط الأسبوعي: إيجابي
+                weekly_positive = weekly_state_from_daily(df_d_conf, suffix)
+                if not weekly_positive:
+                    continue
+
+                # (3) شرط الشهري: "أول اختراق فقط"
+                monthly_first_breakout = monthly_first_breakout_from_daily(df_d_conf, suffix)
+                if not monthly_first_breakout:
+                    continue
+
+                # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
+                daily_positive = (df_d["State"].iat[-1] == 1)
+                last_close = float(df_d["Close"].iat[-1])
+
+                sym = code.replace(suffix, '').upper()
+                company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
+                tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
+                url = f"https://www.tradingview.com/symbols/{tv}/"
+
+                results.append(
+                    {
+                        "م": 0,
+                        "الرمز": sym,
+                        "اسم الشركة": company_name,
+                        "سعر الإغلاق": round(last_close, 2),
+                        "يومي": "إيجابي" if daily_positive else "سلبي",
+                        "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
+                        "شهري": "اختراق أول مرة" if monthly_first_breakout else "—",
+                        "رابط TradingView": url,
+                    }
                 )
 
-            df_sel = detect_breakout_with_state(df_sel)
-            if df_sel.empty or not df_sel["FirstBuySig"].iat[-1]:
+            except Exception:
                 continue
 
-            # --- 2) بناء الحالة لكل فاصل (من نفس المصدر اليومي المؤكَّد) ---
-            # يومي
-            df_d = drop_last_if_incomplete(
-                df_d_raw,
-                "1d",
-                suffix,
-                allow_intraday_daily=allow_intraday_daily,
-            )
-            df_d = detect_breakout_with_state(df_d)
-            if df_d.empty:
-                continue
+        if results:
+            df_results = pd.DataFrame(results)[
+                ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
+            ]
+            # ترقيم تسلسلي
+            df_results["م"] = range(1, len(df_results) + 1)
+            # تنسيق السعر
+            df_results["سعر الإغلاق"] = df_results["سعر الإغلاق"].map(lambda x: f"{x:,.2f}")
 
-            # أسبوعي/شهري من اليومي المؤكَّد فقط
-            weekly_positive  = weekly_state_from_daily(df_d_raw, suffix)
-            monthly_positive = monthly_state_from_daily(df_d_raw, suffix)
+            # ===== العنوان الديناميكي أعلى الجدول =====
+            market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
+            day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
+            tf_label_map = {"1d": "اليومي (D)", "1wk": "الأسبوعي (W)", "1mo": "الشهري (M)"}
+            tf_label = tf_label_map.get(interval, str(interval))
 
-            daily_positive = df_d["State"].iat[-1] == 1
-            last_close = float(df_d["Close"].iat[-1])
+            with st.container():
+                st.subheader(f"أبرز اختراقات ({market_name}) - فاصل {tf_label} ليوم {day_str}")
+                html_out = generate_html_table(df_results)
+                st.markdown(html_out, unsafe_allow_html=True)
 
-            sym = code.replace(suffix, '').upper()
-            company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
-            tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
-            url = f"https://www.tradingview.com/symbols/{tv}/"
-
-            results.append(
-                {
-                    "م": 0,  # سنحدّثه لاحقًا
-                    "الرمز": sym,
-                    "اسم الشركة": company_name,
-                    "سعر الإغلاق": round(last_close, 2),
-                    "يومي": "إيجابي" if daily_positive else "سلبي",
-                    "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
-                    "شهري": "إيجابي" if monthly_positive else "سلبي",
-                    "رابط TradingView": url,
-                }
-            )
-        except Exception:
-            continue
-
-    if results:
-        df_results = pd.DataFrame(results)[
-            ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
-        ]
-        # ترقيم تسلسلي
-        df_results["م"] = range(1, len(df_results) + 1)
-
-        # ===== العنوان الديناميكي أعلى الجدول =====
-        market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
-        day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
-        suffix_note = " (حتى الآن)" if (interval == "1d" and allow_intraday_daily) else ""
-        tf_label_map = {"1d": "اليومي (D)", "1wk": "الأسبوعي (W)", "1mo": "الشهري (M)"}
-        tf_label = tf_label_map.get(interval, str(interval))
-
-        with st.container():
-            st.subheader(f"أبرز اختراقات ({market_name}) - فاصل {tf_label} ليوم {day_str}{suffix_note}")
-            st.markdown(generate_html_table(df_results), unsafe_allow_html=True)
-    else:
-        st.info("🔎 لا توجد اختراقات جديدة.")
+                # أزرار تنزيل
+                csv_bytes = df_results.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 تنزيل النتائج CSV",
+                    csv_bytes,
+                    file_name=f"TriplePower_{('KSA' if suffix=='.SR' else 'USA')}_{day_str}.csv",
+                    mime="text/csv"
+                )
+                st.download_button(
+                    "📥 تنزيل النتائج HTML",
+                    html_out.encode("utf-8"),
+                    file_name=f"TriplePower_{('KSA' if suffix=='.SR' else 'USA')}_{day_str}.html",
+                    mime="text/html"
+                )
+        else:
+            st.info("🔎 لا توجد رموز تحقق الشروط (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري).")
