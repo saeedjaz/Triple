@@ -662,3 +662,62 @@ if st.button("🔎 تنفيذ التحليل"):
                 )
         else:
             st.info("🔎 لا توجد رموز تحقق الشروط (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري).")
+
+# =============================
+# 🕌 الفلتر الشرعي المستقل (ناسداك) - منفصل عن فلتر القوة الثلاثية
+# =============================
+st.markdown("---")
+st.header("🕌 الفلتر الشرعي المستقل (ناسداك)")
+
+with st.form("shariah_standalone"):
+    symbols_sa = st.text_area(
+        "أدخل رموز ناسداك (مفصولة بمسافة أو سطر)",
+        "AAPL MSFT GOOGL"
+    )
+    show_details_sa = st.checkbox("عرض تفاصيل النِّسَب الشرعية", True)
+    run_sa = st.form_submit_button("تشغيل الفلتر الشرعي")
+
+if run_sa:
+    syms = [s.strip().upper() for s in symbols_sa.replace("\n", " ").split() if s.strip()]
+    if not syms:
+        st.warning("⚠️ الرجاء إدخال رموز ناسداك.")
+    else:
+        rows = []
+        for i, sym in enumerate(syms, start=1):
+            try:
+                sh = shariah_screen_nasdaq(sym)  # الدالة موجودة مسبقًا في الملف
+                dr = "غير متاح" if sh["debt_ratio"] is None else f"{sh['debt_ratio']*100:.2f}%"
+                hr = "غير متاح" if sh["haram_ratio"] is None else f"{sh['haram_ratio']*100:.2f}%"
+                url = f"https://www.tradingview.com/symbols/{sym}/"
+                rows.append({
+                    "م": i,
+                    "الرمز": sym,
+                    "اسم الشركة": "غير معروف",  # نبقيه بسيطًا للحفاظ على شكل الجدول الأصلي
+                    "الحكم الشرعي": sh["verdict"],
+                    "نِسَب شرعية": (f"دين: {dr} | محرم: {hr}") if show_details_sa else "",
+                    "ملاحظات شرعية": "؛ ".join(sh["reasons"]) if sh.get("reasons") else "",
+                    "رابط TradingView": url
+                })
+            except Exception:
+                rows.append({
+                    "م": i, "الرمز": sym, "اسم الشركة": "غير معروف",
+                    "الحكم الشرعي": "يحتاج مراجعة",
+                    "نِسَب شرعية": "دين: غير متاح | محرم: غير متاح" if show_details_sa else "",
+                    "ملاحظات شرعية": "تعذّر التحليل.",
+                    "رابط TradingView": f"https://www.tradingview.com/symbols/{sym}/"
+                })
+
+        df_sa = pd.DataFrame(rows)[
+            ["م", "الرمز", "اسم الشركة", "الحكم الشرعي", "نِسَب شرعية", "ملاحظات شرعية", "رابط TradingView"]
+        ]
+        st.markdown("#### نتائج الفلتر الشرعي المستقل")
+        st.markdown(generate_html_table(df_sa), unsafe_allow_html=True)
+
+        csv_sa = df_sa.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📥 تنزيل نتائج الفلتر الشرعي (CSV)",
+            data=csv_sa,
+            file_name="Shariah_only_results.csv",
+            mime="text/csv"
+        )
+
