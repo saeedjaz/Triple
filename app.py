@@ -675,41 +675,69 @@ with st.form("shariah_standalone"):
         "AAPL MSFT GOOGL"
     )
     show_details_sa = st.checkbox("عرض تفاصيل النِّسَب الشرعية", True)
+    force_refresh = st.checkbox("تحديث البيانات (تجاهل الكاش)", False)
+    throttle = st.slider("إبطاء الطلبات (ثوانٍ بين كل رمز)", 0.0, 2.0, 0.6, 0.1)
     run_sa = st.form_submit_button("تشغيل الفلتر الشرعي")
 
 if run_sa:
+    import time
+
     syms = [s.strip().upper() for s in symbols_sa.replace("\n", " ").split() if s.strip()]
     if not syms:
         st.warning("⚠️ الرجاء إدخال رموز ناسداك.")
     else:
+        # مسح كاش الدالة (إن أمكن) أو كاش التطبيق بالكامل عند الطلب
+        if force_refresh:
+            try:
+                shariah_screen_nasdaq.clear()  # متاحة عند تزيين الدالة بـ @st.cache_data
+            except Exception:
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+
         rows = []
+        progress = st.progress(0)
+        total = len(syms)
+
         for i, sym in enumerate(syms, start=1):
             try:
-                sh = shariah_screen_nasdaq(sym)  # الدالة موجودة مسبقًا في الملف
-                dr = "غير متاح" if sh["debt_ratio"] is None else f"{sh['debt_ratio']*100:.2f}%"
-                hr = "غير متاح" if sh["haram_ratio"] is None else f"{sh['haram_ratio']*100:.2f}%"
-                url = f"https://www.tradingview.com/symbols/{sym}/"
+                if throttle and throttle > 0:
+                    time.sleep(throttle)
+
+                sh = shariah_screen_nasdaq(sym)  # الدالة معرفة سابقًا في الملف
+
+                dr = "غير متاح" if sh.get("debt_ratio") is None else f"{sh['debt_ratio']*100:.2f}%"
+                hr = "غير متاح" if sh.get("haram_ratio") is None else f"{sh['haram_ratio']*100:.2f}%"
+
                 rows.append({
                     "م": i,
                     "الرمز": sym,
-                    "اسم الشركة": "غير معروف",  # نبقيه بسيطًا للحفاظ على شكل الجدول الأصلي
-                    "الحكم الشرعي": sh["verdict"],
+                    "اسم الشركة": "غير معروف",  # نُبقيه بسيطًا للحفاظ على شكل الجدول الأصلي
+                    "الحكم الشرعي": sh.get("verdict", "يحتاج مراجعة"),
                     "نِسَب شرعية": (f"دين: {dr} | محرم: {hr}") if show_details_sa else "",
-                    "ملاحظات شرعية": "؛ ".join(sh["reasons"]) if sh.get("reasons") else "",
-                    "رابط TradingView": url
+                    "ملاحظات شرعية": "؛ ".join(sh.get("reasons", [])) if sh.get("reasons") else "",
+                    "رابط TradingView": f"https://www.tradingview.com/symbols/{sym}/",
                 })
-            except Exception:
+            except Exception as e:
                 rows.append({
-                    "م": i, "الرمز": sym, "اسم الشركة": "غير معروف",
+                    "م": i,
+                    "الرمز": sym,
+                    "اسم الشركة": "غير معروف",
                     "الحكم الشرعي": "يحتاج مراجعة",
                     "نِسَب شرعية": "دين: غير متاح | محرم: غير متاح" if show_details_sa else "",
-                    "ملاحظات شرعية": "تعذّر التحليل.",
-                    "رابط TradingView": f"https://www.tradingview.com/symbols/{sym}/"
+                    "ملاحظات شرعية": f"تعذّر التحليل: {type(e).__name__}",
+                    "رابط TradingView": f"https://www.tradingview.com/symbols/{sym}/",
                 })
+
+            progress.progress(i / total)
+
+        progress.empty()
 
         df_sa = pd.DataFrame(rows)[
             ["م", "الرمز", "اسم الشركة", "الحكم الشرعي", "نِسَب شرعية", "ملاحظات شرعية", "رابط TradingView"]
         ]
+
         st.markdown("#### نتائج الفلتر الشرعي المستقل")
         st.markdown(generate_html_table(df_sa), unsafe_allow_html=True)
 
@@ -718,6 +746,10 @@ if run_sa:
             "📥 تنزيل نتائج الفلتر الشرعي (CSV)",
             data=csv_sa,
             file_name="Shariah_only_results.csv",
-            mime="text/csv"
+            mime="text/csv",
         )
 
+        st.caption(
+            "المعايير: دين ≤ 30% من الأكبر بين القيمة السوقية والدفترية، وإيراد محرّم ≤ 5%، مع استبعاد الأنشطة المحرّمة. "
+            "مستقى من قرار (485) وتعديل 2004."
+        )
