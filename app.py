@@ -1,3 +1,4 @@
+
 import os
 import re
 from dotenv import load_dotenv
@@ -8,7 +9,6 @@ import yfinance as yf
 from datetime import datetime, date, timedelta
 from html import escape
 from zoneinfo import ZoneInfo  # لضبط التوقيت المحلي
-import hashlib, secrets, base64  # تشفير كلمات المرور
 
 # =============================
 # تحميل متغيرات البيئة
@@ -16,15 +16,10 @@ import hashlib, secrets, base64  # تشفير كلمات المرور
 load_dotenv()
 SHEET_CSV_URL = os.getenv("SHEET_CSV_URL")
 
-# إيقاف آمن إذا لم يتم ضبط متغير البيئة
-if not SHEET_CSV_URL:
-    st.error("⚠️ لم يتم ضبط SHEET_CSV_URL في متغيرات البيئة. أضفه ثم أعد التشغيل.")
-    st.stop()
-
 # =============================
 # تهيئة الصفحة العامة + دعم RTL
 # =============================
-st.set_page_config(page_title="🔒🔍 فلتر الاشتراكات واختراق الشموع | TriplePower", layout="wide")
+st.set_page_config(page_title="🔒🔍 فلتر منصة القوة الثلاثية للتداول في الأسواق المالية  | TriplePowerFilter", layout="wide")
 
 # حقن CSS عالمي لجعل الاتجاه RTL في كامل التطبيق
 RTL_CSS = """
@@ -37,6 +32,11 @@ RTL_CSS = """
   label, .stButton button { text-align: right; }
   table { direction: rtl; }
   .stAlert { direction: rtl; }
+  .positive {background-color: #d4edda; color: #155724; font-weight: bold;}
+  .negative {background-color: #f8d7da; color: #721c24; font-weight: bold;}
+  .halal  { background-color:#d1fae5; color:#065f46; font-weight:bold; }
+  .haram  { background-color:#fee2e2; color:#991b1b; font-weight:bold; }
+  .review { background-color:#fff7ed; color:#92400e; font-weight:bold; }
 </style>
 """
 st.markdown(RTL_CSS, unsafe_allow_html=True)
@@ -50,7 +50,7 @@ def linkify(text: str) -> str:
     if not text:
         return ""
     pattern = r"(https?://[^\s]+)"
-    return re.sub(pattern, r"[\1](\1)", text)
+    return re.sub(pattern, r"[\\1](\\1)", text)
 
 def load_important_links() -> str:
     """تحميل محتوى ملف الروابط المهمة (إن وُجد)."""
@@ -70,7 +70,7 @@ def load_symbols_names(file_path: str, market_type: str) -> dict:
                 line = line.strip()
                 if not line:
                     continue
-                parts = line.split('\t', 1)
+                parts = line.split('\\t', 1)
                 if len(parts) == 2:
                     symbol, name = parts
                     if market_type == "سعودي":
@@ -82,27 +82,6 @@ def load_symbols_names(file_path: str, market_type: str) -> dict:
         st.warning(f"⚠️ خطأ في تحميل ملف {file_path}: {e}")
         return {}
 
-# ===== تشفير كلمات المرور (PBKDF2) =====
-PBKDF_ITER = 100_000
-
-def _pbkdf2_hash(password: str, salt: bytes | None = None) -> str:
-    salt = salt or os.urandom(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF_ITER)
-    return f"pbkdf2$sha256${PBKDF_ITER}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
-
-def _pbkdf2_verify(password: str, stored: str) -> bool:
-    try:
-        algo, algoname, iters, b64salt, b64hash = stored.split("$", 4)
-        if algo != "pbkdf2" or algoname != "sha256":
-            return False
-        iters = int(iters)
-        salt = base64.b64decode(b64salt)
-        expected = base64.b64decode(b64hash)
-        test = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
-        return secrets.compare_digest(test, expected)
-    except Exception:
-        return False
-
 # ===== كاش لتحميل بيانات المستخدمين =====
 @st.cache_data(ttl=3600)
 def load_users():
@@ -110,15 +89,7 @@ def load_users():
     return df.to_dict("records")
 
 def check_login(username, password, users):
-    for u in users:
-        if u.get("username") == username:
-            pwd_hash = u.get("password_hash")
-            if pwd_hash:  # المسار الآمن
-                return u if _pbkdf2_verify(password, pwd_hash) else None
-            # توافق خلفي مع العمود القديم
-            if u.get("password") == password:
-                return u
-    return None
+    return next((u for u in users if u.get("username") == username and u.get("password") == password), None)
 
 def is_expired(expiry_date: str) -> bool:
     try:
@@ -129,7 +100,7 @@ def is_expired(expiry_date: str) -> bool:
 
 @st.cache_data(ttl=300)
 def fetch_data(symbols, sd, ed, iv):
-    """تنزيل بيانات من yfinance لدفعة واحدة."""
+    """تنزيل بيانات من yfinance. حارس للمدخلات لتجنّب مكالمات فارغة."""
     if not symbols or not str(symbols).strip():
         return None
     try:
@@ -147,40 +118,11 @@ def fetch_data(symbols, sd, ed, iv):
         st.error(f"خطأ في تحميل البيانات: {e}")
         return None
 
-def extract_symbol_df(batch_df: pd.DataFrame, code: str) -> pd.DataFrame | None:
-    """
-    استخراج DataFrame لرمز محدد من نتيجة yfinance سواءً كانت MultiIndex (عدة رموز)
-    أو DataFrame أعمدة مسطّحة (رمز واحد).
-    """
-    if batch_df is None or batch_df.empty:
-        return None
-    try:
-        if isinstance(batch_df.columns, pd.MultiIndex):
-            # نستخدم المستوى الأول كرموز
-            lvl0 = batch_df.columns.get_level_values(0)
-            if code in set(lvl0):
-                return batch_df[code].reset_index()
-            else:
-                return None
-        else:
-            # حالة رمز واحد: الأعمدة تكون Open/High/Low/Close.. مباشرة
-            cols = set(map(str.lower, batch_df.columns.astype(str)))
-            if {"open","high","low","close"}.issubset(cols):
-                return batch_df.reset_index()
-    except Exception:
-        return None
-    return None
-
 def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intraday_daily: bool = False) -> pd.DataFrame:
     """إسقاط الشمعة غير المكتملة (مع خيار السماح باليومي الحالي)."""
     if df is None or df.empty:
         return df
     dfx = df.copy()
-
-    # لو كان آخر صف ناقص قيماً (OHLC) نحذفه
-    if dfx.iloc[-1][["Open","High","Low","Close"]].isna().any():
-        return dfx.iloc[:-1] if len(dfx) > 1 else dfx.iloc[0:0]
-
     last_dt = pd.to_datetime(dfx["Date"].iloc[-1]).date()
 
     if tf == "1d":
@@ -202,6 +144,7 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
         return dfx  # الأسبوعي يُفحص في التجميع من اليومي
 
     if tf == "1mo":
+        # لن نستخدم 1mo من مزوّد البيانات بعد الآن، لكن نترك الحارس إن استُخدم.
         now = datetime.now(ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York"))
         today = now.date()
         if last_dt.year == today.year and last_dt.month == today.month:
@@ -344,16 +287,6 @@ def monthly_state_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
     df_m = detect_breakout_with_state(df_m)
     return bool(df_m["State"].iat[-1] == 1)
 
-def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
-    """
-    True إذا كان آخر شمعه شهرية (المؤكدة) سجّلت أول اختراق (FirstBuySig) حسب منطق 55%.
-    """
-    df_m = resample_monthly_from_daily(df_daily, suffix)
-    if df_m is None or df_m.empty:
-        return False
-    df_m = detect_breakout_with_state(df_m)
-    return bool(df_m["FirstBuySig"].iat[-1])  # أول اختراق شهري (في هذه الدورة)
-
 def generate_html_table(df: pd.DataFrame) -> str:
     html = """
     <style>
@@ -366,6 +299,9 @@ def generate_html_table(df: pd.DataFrame) -> str:
     a:hover {text-decoration: underline;}
     .positive {background-color: #d4edda; color: #155724; font-weight: bold;}
     .negative {background-color: #f8d7da; color: #721c24; font-weight: bold;}
+    .halal  { background-color:#d1fae5; color:#065f46; font-weight:bold; }
+    .haram  { background-color:#fee2e2; color:#991b1b; font-weight:bold; }
+    .review { background-color:#fff7ed; color:#92400e; font-weight:bold; }
     </style>
     <table>
     <thead><tr>"""
@@ -383,6 +319,11 @@ def generate_html_table(df: pd.DataFrame) -> str:
                     cell_class = "positive"
                 elif str(val).strip() == "سلبي":
                     cell_class = "negative"
+            if col == "الحكم الشرعي":
+                v = str(val).strip()
+                cell_class = "review"
+                if v == "مباح": cell_class = "halal"
+                elif v == "غير مباح": cell_class = "haram"
             if col == "رابط TradingView":
                 safe_url = escape(val)
                 html += f'<td><a href="{safe_url}" target="_blank" rel="noopener">{safe_url}</a></td>'
@@ -391,6 +332,151 @@ def generate_html_table(df: pd.DataFrame) -> str:
         html += "</tr>"
     html += "</tbody></table>"
     return html
+
+# =============================
+# 🕌 فلتر شرعي (قرار 485) لرموز ناسداك
+# =============================
+
+BANNED_PATTERNS = [
+    r"bank", r"insurance", r"reinsurance", r"mortgage", r"capital markets",
+    r"consumer finance", r"casino", r"gaming", r"gambling", r"tobacco",
+    r"winery|distiller|alcohol", r"adult"
+]
+
+def _is_banned_sector(sector: str, industry: str) -> bool:
+    text = f"{sector or ''} {industry or ''}".lower()
+    return any(re.search(p, text) for p in BANNED_PATTERNS)
+
+def _safe_first(x):
+    import pandas as _pd, numpy as _np
+    if x is None: return _np.nan
+    try:
+        if hasattr(x, "dropna"):
+            s = x.dropna()
+            if len(s) > 0: return s.iloc[0]
+    except Exception:
+        pass
+    try:
+        if _pd.isna(x): return _np.nan
+        return x
+    except Exception:
+        return _np.nan
+
+def _try_rows(df, names):
+    if df is None or getattr(df, "empty", True): return None
+    idx = [str(i).lower() for i in df.index]
+    for name in names:
+        if name.lower() in idx:
+            return df.loc[df.index[idx.index(name.lower())]]
+    return None
+
+@st.cache_data(ttl=86400)
+def shariah_screen_nasdaq(symbol: str) -> dict:
+    """
+    يُرجع: verdict (مباح/غير مباح/يحتاج مراجعة)، نسب debt_ratio/haram_ratio، sector/industry، reasons[]
+    """
+    t = yf.Ticker(symbol)
+
+    # معلومات عامة
+    try:
+        info = t.get_info() if hasattr(t, "get_info") else t.info
+    except Exception:
+        info = getattr(t, "info", {}) or {}
+    sector = info.get("sector")
+    industry = info.get("industry")
+
+    # القوائم المالية (سنوي ثم ربعي احتياطًا)
+    def _pick_first_available(getter_names):
+        for g in getter_names:
+            try:
+                df = getattr(t, g)
+                if df is not None and not df.empty:
+                    return df
+            except Exception:
+                pass
+        return None
+
+    bs = _pick_first_available(["balance_sheet", "quarterly_balance_sheet"])
+    is_ = _pick_first_available(["income_stmt", "quarterly_income_stmt"])
+
+    # القيمة السوقية والدفترية
+    market_cap = None
+    try:
+        market_cap = getattr(t, "fast_info", {}).get("market_cap", None)
+    except Exception:
+        pass
+    if not market_cap:
+        market_cap = info.get("marketCap")
+
+    equity = _try_rows(bs, ["Total Stockholder Equity", "Total Equity Gross Minority Interest", "Stockholders Equity"])
+    book_value = _safe_first(equity)
+
+    # دين = طويل + قصير (تقريبي)
+    long_debt = _safe_first(_try_rows(bs, ["Long Term Debt", "Long-Term Debt", "Long Term Debt And Capital Lease Obligation"]))
+    short_debt = _safe_first(_try_rows(bs, [
+        "Short Long Term Debt", "Short/Current Long Term Debt", "Current Portion Of Long Term Debt", "Short Term Debt"
+    ]))
+    total_debt = 0.0
+    for v in [long_debt, short_debt]:
+        if pd.notna(v):
+            total_debt += float(v)
+
+    # إجمالي الإيراد
+    total_rev = _try_rows(is_, ["Total Revenue", "TotalRevenue"])
+    total_rev_val = float(_safe_first(total_rev)) if total_rev is not None and pd.notna(_safe_first(total_rev)) else np.nan
+
+    # تقدير الإيراد المحرم (دخل فوائد/استثمار/غير تشغيلي موجَب فقط)
+    interest_income   = _safe_first(_try_rows(is_, ["Interest Income", "Net Interest Income", "Interest And Similar Income"]))
+    investment_income = _safe_first(_try_rows(is_, ["Investment Income, Net", "Net Investment Income"]))
+    other_nonop       = _safe_first(_try_rows(is_, ["Other Non Operating Income", "Total Other Income/Expense Net", "Other Income (Expense)"]))
+    haram_income_est = float(sum([
+        v for v in [interest_income, investment_income, other_nonop] if (pd.notna(v) and v > 0)
+    ])) if any(pd.notna(v) for v in [interest_income, investment_income, other_nonop]) else np.nan
+
+    # مانع القطاع
+    sector_ok = not _is_banned_sector(sector, industry)
+
+    # مقام نسبة الدين = الأكبر بين (القيمة السوقية، الدفترية) إن وُجدا
+    denom = None
+    if pd.notna(market_cap) and market_cap and market_cap > 0:
+        denom = market_cap
+    if pd.notna(book_value) and book_value and book_value > 0:
+        denom = max(denom or 0, float(book_value))
+    debt_ratio = (total_debt / denom) if (denom and denom > 0 and total_debt is not None) else np.nan
+
+    # نسبة الإيراد المحرّم
+    haram_ratio = (haram_income_est / total_rev_val) if (pd.notna(haram_income_est) and pd.notna(total_rev_val) and total_rev_val > 0) else np.nan
+
+    needs_review, reasons = False, []
+
+    if not sector_ok:
+        reasons.append("النشاط/الصناعة ضمن المحرّمات الواضحة.")
+    if pd.isna(debt_ratio):
+        needs_review = True
+        reasons.append("تعذّر حساب نسبة الدَّين (بيانات ناقصة).")
+    elif debt_ratio > 0.30:
+        reasons.append(f"نسبة الدَّين {debt_ratio:.2%} تتجاوز 30%.")
+
+    if pd.isna(haram_ratio):
+        needs_review = True
+        reasons.append("تعذّر تقدير نسبة الإيراد المحرّم بدقة.")
+    elif haram_ratio > 0.05:
+        reasons.append(f"نسبة الإيراد المحرّم {haram_ratio:.2%} تتجاوز 5%.")
+
+    if sector_ok and (pd.notna(debt_ratio) and debt_ratio <= 0.30) and (pd.notna(haram_ratio) and haram_ratio <= 0.05):
+        verdict = "مباح"
+    elif needs_review and not any("تتجاوز" in r for r in reasons):
+        verdict = "يحتاج مراجعة"
+    else:
+        verdict = "غير مباح"
+
+    return {
+        "verdict": verdict,
+        "debt_ratio": None if pd.isna(debt_ratio) else float(debt_ratio),
+        "haram_ratio": None if pd.isna(haram_ratio) else float(haram_ratio),
+        "sector": sector, "industry": industry,
+        "reasons": reasons
+    }
 
 # =============================
 # جلسة العمل (حالة المستخدم)
@@ -429,7 +515,7 @@ if not st.session_state.authenticated:
         important_links = load_important_links()
         st.markdown(
             "<div style='background-color:#f0f2f6;padding:20px;border-radius:8px;box-shadow:0 2px 5px rgb(0 0 0 / 0.1);line-height:1.6;'>"
-            "<h3 style='font-size:20px;'>فلتر منصة القوة الثلاثية للتداول في الأسواق المالية TriplePower</h3>"
+            "<h3 style='font-size:20px;'>فلتر منصة القوة الثلاثية للتداول في الأسواق المالية TriplePowerFilter</h3>"
             + linkify(important_links) + "</div>",
             unsafe_allow_html=True,
         )
@@ -477,9 +563,7 @@ with st.sidebar:
     if intraday_data is not None:
         for sym in sample_symbols:
             try:
-                df_sym = extract_symbol_df(intraday_data, sym)
-                if df_sym is None:
-                    continue
+                df_sym = intraday_data[sym].reset_index()
                 df_sym = detect_breakout_with_state(df_sym)
                 if not df_sym.empty and df_sym["FirstBuySig"].iat[-1]:
                     breakout_list.append(sym)
@@ -492,19 +576,28 @@ with st.sidebar:
     st.markdown("### ⚙️ إعدادات التحليل")
     market = st.sidebar.selectbox("اختر السوق", ["السوق السعودي", "السوق الأمريكي"])
     suffix = ".SR" if market == "السوق السعودي" else ""
-    interval = st.sidebar.selectbox("الفاصل الزمني (للعرض فقط)", ["1d", "1wk", "1mo"])
+    interval = st.sidebar.selectbox("الفاصل الزمني", ["1d", "1wk", "1mo"])
     start_date = st.sidebar.date_input("من", date(2020, 1, 1))
     end_date = st.sidebar.date_input("إلى", date.today())
 
+    # زر/خيار: عرض اختراقات اليوم دون انتظار إغلاق الشمعة
     allow_intraday_daily = st.sidebar.checkbox(
-        "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي) — للعرض فقط",
+        "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي)",
         value=False,
-        help="الفلتر الأساسي يشترط إغلاق يومي مؤكد. هذا الخيار لا يؤثر على الفلترة، فقط على أي عرض اختياري.",
+        help="اليومي فقط. الأسبوعي/الشهري مؤكدان دائمًا ويعاد تجميعهما من اليومي.",
     )
 
-    # حجم الدُفعة عند الجلب (لجميع الرموز)
-    batch_size = st.sidebar.slider("حجم الدُفعة عند الجلب", min_value=20, max_value=120, value=60, step=10,
-                                   help="تكبيرها يسرّع الجلب ولكن قد يستهلك ذاكرة أكبر.")
+    # الفلتر الشرعي (ناسداك)
+    st.markdown("### 🕌 الفلتر الشرعي (NASDAQ)")
+    enable_shariah = st.sidebar.checkbox(
+        "تفعيل الفلتر الشرعي (ناسداك فقط)",
+        value=False,
+        help="يطبّق قرار (485) وتحديثه على رموز السوق الأمريكي. سيضيف أعمدة الحكم الشرعي للجدول."
+    )
+    show_shariah_details = st.sidebar.checkbox(
+        "عرض تفاصيل النِّسَب الشرعية داخل الجدول",
+        value=True
+    )
 
     # تحميل قاموس الأسماء
     symbol_name_dict = (
@@ -532,9 +625,7 @@ with st.sidebar:
 # إدخال الرموز
 # =============================
 symbols_input = st.text_area("أدخل الرموز (مفصولة بمسافة أو سطر)", st.session_state.get("symbols", ""))
-symbols = [s.strip() + suffix for s in symbols_input.replace("\n", " ").split() if s.strip()]
-
-# (ألغينا أي حد أقصى للرموز — سيتم تحليل الكل عبر دفعات)
+symbols = [s.strip() + suffix for s in symbols_input.replace("\\n", " ").split() if s.strip()]
 
 # =============================
 # تنفيذ التحليل
@@ -544,121 +635,126 @@ if st.button("🔎 تنفيذ التحليل"):
         st.warning("⚠️ الرجاء إدخال رموز أولًا.")
         st.stop()
 
-    with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر لكل الرموز..."):
-        results = []
+    # مصدر واحد: اليومي
+    ddata = fetch_data(" ".join(symbols), start_date, end_date, "1d")
+    if ddata is None:
+        st.error("⚠️ لم تتم تحميل بيانات السوق؛ يرجى المحاولة لاحقًا.")
+        st.stop()
+    if isinstance(ddata, pd.DataFrame) and ddata.empty:
+        st.info("ℹ️ البيانات فارغة للفترة/الأسواق المحددة.")
+        st.stop()
 
-        total = len(symbols)
-        prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
-        processed = 0
+    results = []
+    for code in symbols:
+        try:
+            # --- 1) تجهيز داتا الفاصل المختار من اليومي المؤكَّد ---
+            df_d_raw = ddata[code].reset_index()             # يومي خام
+            if interval == "1wk":
+                df_sel = resample_weekly_from_daily(df_d_raw, suffix)
+            elif interval == "1mo":
+                df_sel = resample_monthly_from_daily(df_d_raw, suffix)
+            else:
+                df_sel = drop_last_if_incomplete(
+                    df_d_raw,
+                    "1d",
+                    suffix,
+                    allow_intraday_daily=allow_intraday_daily,   # فقط لليومي
+                )
 
-        # نجلب ونعالج على دفعات لتقليل استهلاك الذاكرة
-        for i in range(0, total, batch_size):
-            chunk_syms = symbols[i:i + batch_size]
-            ddata_chunk = fetch_data(" ".join(chunk_syms), start_date, end_date, "1d")
-            if ddata_chunk is None or (isinstance(ddata_chunk, pd.DataFrame) and ddata_chunk.empty):
-                # تحديث التقدّم حتى لو فشل الدفعة
-                processed += len(chunk_syms)
-                prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
+            df_sel = detect_breakout_with_state(df_sel)
+            if df_sel.empty or not df_sel["FirstBuySig"].iat[-1]:
                 continue
 
-            for code in chunk_syms:
-                try:
-                    # استخراج اليومي للرمز من الدفعة الحالية
-                    df_d_raw = extract_symbol_df(ddata_chunk, code)
-                    if df_d_raw is None or df_d_raw.empty:
-                        continue
+            # --- 2) بناء الحالة لكل فاصل (من نفس المصدر اليومي المؤكَّد) ---
+            # يومي
+            df_d = drop_last_if_incomplete(
+                df_d_raw,
+                "1d",
+                suffix,
+                allow_intraday_daily=allow_intraday_daily,
+            )
+            df_d = detect_breakout_with_state(df_d)
+            if df_d.empty:
+                continue
 
-                    # يومي مؤكد فقط (لا نسمح بمعاينة مبكرة هنا لأنه شرط أساسي)
-                    df_d_conf = drop_last_if_incomplete(
-                        df_d_raw,
-                        "1d",
-                        suffix,
-                        allow_intraday_daily=False,
-                    )
-                    if df_d_conf is None or df_d_conf.empty:
-                        continue
+            # أسبوعي/شهري من اليومي المؤكَّد فقط
+            weekly_positive  = weekly_state_from_daily(df_d_raw, suffix)
+            monthly_positive = monthly_state_from_daily(df_d_raw, suffix)
 
-                    # منطق 55% على اليومي المؤكد
-                    df_d = detect_breakout_with_state(df_d_conf)
-                    if df_d is None or df_d.empty:
-                        continue
+            daily_positive = df_d["State"].iat[-1] == 1
+            last_close = float(df_d["Close"].iat[-1])
 
-                    # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية 55% (إغلاق يومي)
-                    daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
-                    if not daily_first_breakout:
-                        continue
+            sym = code.replace(suffix, '').upper()
+            company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
+            tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
+            url = f"https://www.tradingview.com/symbols/{tv}/"
 
-                    # (2) شرط الأسبوعي: إيجابي
-                    weekly_positive = weekly_state_from_daily(df_d_conf, suffix)
-                    if not weekly_positive:
-                        continue
+            results.append(
+                {
+                    "م": 0,  # سنحدّثه لاحقًا
+                    "الرمز": sym,
+                    "اسم الشركة": company_name,
+                    "سعر الإغلاق": round(last_close, 2),
+                    "يومي": "إيجابي" if daily_positive else "سلبي",
+                    "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
+                    "شهري": "إيجابي" if monthly_positive else "سلبي",
+                    "رابط TradingView": url,
+                }
+            )
+        except Exception:
+            continue
 
-                    # (3) شرط الشهري: "أول اختراق فقط"
-                    monthly_first_breakout = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                    if not monthly_first_breakout:
-                        continue
+    if results:
+        df_results = pd.DataFrame(results)[
+            ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
+        ]
+        # ترقيم تسلسلي
+        df_results["م"] = range(1, len(df_results) + 1)
 
-                    # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
-                    daily_positive = (df_d["State"].iat[-1] == 1)
-                    last_close = float(df_d["Close"].iat[-1])
+        # ===== دمج الفلتر الشرعي (ناسداك) في نفس الجدول =====
+        if enable_shariah:
+            if suffix != "":
+                st.info("🕌 الفلتر الشرعي مفعّل، لكنه متاح حاليًا للسوق الأمريكي (ناسداك) فقط.")
+            else:
+                st.write("🕌 جاري احتساب الحكم الشرعي… (يُستفاد من الكاش لتسريع التكرار)")
+                sh_cols_verdict, sh_cols_ratios, sh_cols_notes = [], [], []
+                progress = st.progress(0)
+                total = len(df_results)
+                for i, sym in enumerate(df_results["الرمز"].tolist(), start=1):
+                    try:
+                        sh = shariah_screen_nasdaq(sym)
+                        sh_cols_verdict.append(sh["verdict"])
+                        dr = "غير متاح" if sh["debt_ratio"] is None else f"{sh['debt_ratio']*100:.2f}%"
+                        hr = "غير متاح" if sh["haram_ratio"] is None else f"{sh['haram_ratio']*100:.2f}%"
+                        if show_shariah_details:
+                            sh_cols_ratios.append(f"دين: {dr} | محرم: {hr}")
+                        else:
+                            sh_cols_ratios.append("")
+                        notes = "؛ ".join(sh["reasons"]) if sh.get("reasons") else ""
+                        sh_cols_notes.append(notes)
+                    except Exception:
+                        sh_cols_verdict.append("يحتاج مراجعة")
+                        sh_cols_ratios.append("دين: غير متاح | محرم: غير متاح")
+                        sh_cols_notes.append("تعذّر التحليل.")
+                    progress.progress(i/total)
+                progress.empty()
 
-                    sym = code.replace(suffix, '').upper()
-                    company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
-                    tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
-                    url = f"https://www.tradingview.com/symbols/{tv}/"
+                insert_at = 4  # بعد سعر الإغلاق
+                df_results.insert(insert_at, "الحكم الشرعي", sh_cols_verdict)
+                if show_shariah_details:
+                    df_results.insert(insert_at + 1, "نِسَب شرعية", sh_cols_ratios)
+                # ملاحظات اختيارية
+                # df_results.insert(insert_at + (2 if show_shariah_details else 1), "ملاحظات شرعية", sh_cols_notes)
 
-                    results.append(
-                        {
-                            "م": 0,
-                            "الرمز": sym,
-                            "اسم الشركة": company_name,
-                            "سعر الإغلاق": round(last_close, 2),
-                            "يومي": "إيجابي" if daily_positive else "سلبي",
-                            "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
-                            "شهري": "اختراق أول مرة" if monthly_first_breakout else "—",
-                            "رابط TradingView": url,
-                        }
-                    )
+        # ===== العنوان الديناميكي أعلى الجدول =====
+        market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
+        day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
+        suffix_note = " (حتى الآن)" if (interval == "1d" and allow_intraday_daily) else ""
+        tf_label_map = {"1d": "اليومي (D)", "1wk": "الأسبوعي (W)", "1mo": "الشهري (M)"}
+        tf_label = tf_label_map.get(interval, str(interval))
 
-                except Exception:
-                    continue
-
-            processed += len(chunk_syms)
-            prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
-
-        if results:
-            df_results = pd.DataFrame(results)[
-                ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
-            ]
-            # ترقيم تسلسلي
-            df_results["م"] = range(1, len(df_results) + 1)
-            # تنسيق السعر
-            df_results["سعر الإغلاق"] = df_results["سعر الإغلاق"].map(lambda x: f"{x:,.2f}")
-
-            # ===== العنوان الديناميكي أعلى الجدول =====
-            market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
-            day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
-            tf_label_map = {"1d": "اليومي (D)", "1wk": "الأسبوعي (W)", "1mo": "الشهري (M)"}
-            tf_label = tf_label_map.get(interval, str(interval))
-
-            with st.container():
-                st.subheader(f"أبرز اختراقات ({market_name}) - فاصل {tf_label} ليوم {day_str}")
-                html_out = generate_html_table(df_results)
-                st.markdown(html_out, unsafe_allow_html=True)
-
-                # أزرار تنزيل
-                csv_bytes = df_results.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📥 تنزيل النتائج CSV",
-                    csv_bytes,
-                    file_name=f"TriplePower_{('KSA' if suffix=='.SR' else 'USA')}_{day_str}.csv",
-                    mime="text/csv"
-                )
-                st.download_button(
-                    "📥 تنزيل النتائج HTML",
-                    html_out.encode("utf-8"),
-                    file_name=f"TriplePower_{('KSA' if suffix=='.SR' else 'USA')}_{day_str}.html",
-                    mime="text/html"
-                )
-        else:
-            st.info("🔎 لا توجد رموز تحقق الشروط (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري).")
+        with st.container():
+            st.subheader(f"أبرز اختراقات ({market_name}) - فاصل {tf_label} ليوم {day_str}{suffix_note}")
+            st.markdown(generate_html_table(df_results), unsafe_allow_html=True)
+    else:
+        st.info("🔎 لا توجد اختراقات جديدة.")
