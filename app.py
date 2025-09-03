@@ -2,7 +2,7 @@
 # =========================================================
 # منصة TriplePower - يعرض "جدول الأهداف" فقط (Wide: يومي + أسبوعي)
 # + عمودان في النهاية: القوة والتسارع الشهري ، F:M
-# (يتضمن إصلاح الدمج لمنع ValueError باختلاف أنواع الأعمدة)
+# (يتضمن إصلاح التجميع الأسبوعي لإسقاط الأسبوع الجاري غير المغلق + إصلاح الدمج)
 # =========================================================
 
 import os
@@ -243,42 +243,56 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFr
 
 # =============================
 # إعادة التجميع الأسبوعي/الشهري من اليومي المؤكَّد
+# (إصلاح: إسقاط الأسبوع الجاري غير المغلق فعليًا)
 # =============================
-def _week_is_closed_by_data(df_daily: pd.DataFrame, suffix: str) -> bool:
-    df = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
-    if df is None or df.empty:
-        return False
+def _is_current_week_closed(suffix: str):
+    """يرجع (هل أُغلق أسبوع التداول الحالي؟, تاريخ نهاية هذا الأسبوع)."""
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
     now = datetime.now(tz)
-    last_dt = pd.to_datetime(df["Date"].iat[-1])
-    if last_dt.date() < now.date():
-        return True
-    close_h, close_m = (15,10) if suffix==".SR" else (16,5)
-    return (last_dt.date() == now.date()) and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m))
+    end_weekday = 3 if suffix == ".SR" else 4  # Thu=3 (KSA), Fri=4 (US)
+    days_ahead = (end_weekday - now.weekday()) % 7
+    week_end_date = (now + timedelta(days=days_ahead)).date()
+    close_h, close_m = (15, 10) if suffix == ".SR" else (16, 5)
+    closed = (now.date() > week_end_date) or (
+        now.date() == week_end_date and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m))
+    )
+    return closed, week_end_date
 
 def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """تجميع أسبوعي من اليومي المؤكد + إسقاط الأسبوع الجاري إذا لم يُغلق (فعليًا يوم الخميس للسعودي)."""
     if df_daily is None or df_daily.empty:
         return df_daily.iloc[0:0]
+
     df_daily = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
     if df_daily.empty:
         return df_daily.iloc[0:0]
+
     dfw = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
     dfw.set_index("Date", inplace=True)
+
     rule = "W-THU" if suffix == ".SR" else "W-FRI"
     dfw = dfw.resample(rule).agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna().reset_index()
-    if not _week_is_closed_by_data(df_daily, suffix) and not dfw.empty:
-        dfw = dfw.iloc[:-1]
+
+    is_closed, current_week_end = _is_current_week_closed(suffix)
+    if not is_closed and not dfw.empty:
+        last_week_label = pd.to_datetime(dfw["Date"].iat[-1]).date()
+        if last_week_label == current_week_end:
+            dfw = dfw.iloc[:-1]
     return dfw
 
 def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """شهري من اليومي المؤكَّد + استبعاد الشهر الجاري إذا لم يُغلق."""
     if df_daily is None or df_daily.empty:
         return df_daily.iloc[0:0]
+
     df_daily = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
     if df_daily.empty:
         return df_daily.iloc[0:0]
+
     dfm = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
     dfm.set_index("Date", inplace=True)
     dfm = dfm.resample("M").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna().reset_index()
+
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
     now = datetime.now(tz)
     if not dfm.empty and (dfm["Date"].iat[-1].year == now.year and dfm["Date"].iat[-1].month == now.month):
