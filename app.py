@@ -4,6 +4,7 @@
 # يعتمد اختيار "الشمعة البيعية المعتبرة" على كسر الشمعة الشرائية
 # (بنفسها أو لاحقًا) وفق شرط 55% — يومي/أسبوعي.
 # ويضيف القوة والتسارع الشهري + F:M.
+# مع إصلاح احتساب الأسبوع المغلق فعليًا.
 # =========================================================
 
 import os, re, hashlib, secrets, base64
@@ -166,7 +167,7 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
     return dfx
 
 # =============================
-# منطق 55% (بيعية/شرائية)
+# منطق 55% (بيعية/شرائية) مع "الكسر الآن أو لاحقًا"
 # =============================
 def _body_ratio(c,o,h,l):
     rng=(h-l)
@@ -180,10 +181,8 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
-    o = df["Open"].to_numpy()
-    h = df["High"].to_numpy()
-    l = df["Low"].to_numpy()
-    c = df["Close"].to_numpy()
+    o = df["Open"].to_numpy(); h = df["High"].to_numpy()
+    l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
     br, rng = _body_ratio(c,o,h,l)
     lose55 = (c < o) & (br >= pct) & (rng != 0)  # بيعية 55%
@@ -197,7 +196,7 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
             cur = l[i]
         last_win_low[i] = cur
 
-    # أصغر قاع مستقبلي من i فصاعدًا (يحقق "الكسر لاحقًا")
+    # أصغر قاع مستقبلي (يُحقق "الكسر لاحقًا")
     future_min = np.minimum.accumulate(l[::-1])[::-1]
 
     considered_sell = (
@@ -226,26 +225,54 @@ def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     return (H, round(H+R,2), round(H+2*R,2), round(H+3*R,2))
 
 # =============================
-# إعادة التجميع الأسبوعي/الشهري من اليومي المؤكد
+# التجميع الأسبوعي/الشهري من اليومي المؤكد
+# مع تحديد الأسبوع المغلق فعليًا
 # =============================
-def _week_is_closed_by_data(df_daily: pd.DataFrame, suffix: str)->bool:
-    df=drop_last_if_incomplete(df_daily,"1d",suffix,allow_intraday_daily=False)
-    if df is None or df.empty: return False
-    tz=ZoneInfo("Asia/Riyadh" if suffix==".SR" else "America/New_York")
-    now=datetime.now(tz); last_dt=pd.to_datetime(df["Date"].iat[-1])
-    if last_dt.date()<now.date(): return True
-    ch,cm=(15,10) if suffix==".SR" else (16,5)
-    return (last_dt.date()==now.date()) and (now.hour>ch or (now.hour==ch and now.minute>=cm))
+def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
+    """
+    يرجع (هل أُغلق أسبوع التداول الحالي؟, تاريخ نهاية هذا الأسبوع).
+    السعودي: نهاية الأسبوع الخميس، الأمريكي: الجمعة.
+    """
+    tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
+    now = datetime.now(tz)
+    end_weekday = 3 if suffix == ".SR" else 4   # Thu=3, Fri=4
+    days_to_end = (end_weekday - now.weekday()) % 7
+    week_end_date = now.date() + timedelta(days=days_to_end)
+    close_h, close_m = (15, 10) if suffix == ".SR" else (16, 5)
+    closed = (
+        now.date() > week_end_date or
+        (now.date() == week_end_date and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m)))
+    )
+    return closed, week_end_date
 
-def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFrame:
-    if df_daily is None or df_daily.empty: return df_daily.iloc[0:0]
-    df_daily=drop_last_if_incomplete(df_daily,"1d",suffix,False)
-    if df_daily.empty: return df_daily.iloc[0:0]
-    dfw=df_daily[["Date","Open","High","Low","Close"]].dropna().copy()
-    dfw.set_index("Date",inplace=True)
-    rule="W-THU" if suffix==".SR" else "W-FRI"
-    dfw=dfw.resample(rule).agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().reset_index()
-    if not _week_is_closed_by_data(df_daily,suffix) and not dfw.empty: dfw=dfw.iloc[:-1]
+def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """إنشاء شموع أسبوعية من اليومي المؤكد، واستبعاد أسبوع التداول الجاري إن لم يُغلق."""
+    if df_daily is None or df_daily.empty:
+        return df_daily.iloc[0:0]
+
+    # تأكيد اليومي (إزالة شمعة اليوم الجاري إن لم تغلق)
+    df_daily = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
+    if df_daily.empty:
+        return df_daily.iloc[0:0]
+
+    dfw = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
+    dfw.set_index("Date", inplace=True)
+
+    rule = "W-THU" if suffix == ".SR" else "W-FRI"
+    dfw = dfw.resample(rule).agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+    }).dropna().reset_index()
+
+    # حذف الأسبوع الجاري إذا كان غير مغلق
+    is_closed, current_week_end = _is_current_week_closed(suffix)
+    if (not is_closed) and (not dfw.empty):
+        last_week_label = pd.to_datetime(dfw["Date"].iat[-1]).date()
+        if last_week_label == current_week_end:
+            dfw = dfw.iloc[:-1]
+
     return dfw
 
 def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFrame:
@@ -262,7 +289,7 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFra
     return dfm
 
 # =============================
-# فلتر اختياري (نفسه كما كان)
+# فلتر اختياري (كما كان)
 # =============================
 def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
     if df is None or df.empty: return df
@@ -271,7 +298,6 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
     lose55=(c<o) & (br>=pct) & (rng!=0)
     win55 =(c>o) & (br>=pct) & (rng!=0)
 
-    # تعريف صارم كما كان (الكسر في نفس الشمعة) للفلتر فقط
     last_win_low=np.full(c.shape, np.nan); cur=np.nan
     for i in range(len(c)):
         if win55[i]: cur=l[i]
@@ -313,7 +339,6 @@ def _fmt_num(x):
     except Exception: return "—"
 
 def render_table(df: pd.DataFrame)->str:
-    # تلوين عمودَي "قمة الشمعة ..." مقارنة بسعر الإغلاق
     from html import escape as esc
     html=["<table><thead><tr>"]
     for col in df.columns: html.append(f"<th>{esc(str(col))}</th>")
@@ -446,7 +471,6 @@ if st.button("🔎 إنشاء جدول الأهداف"):
 
             for code in chunk_syms:
                 try:
-                    # استخراج اليومي المؤكد
                     df_d_raw=extract_symbol_df(ddata_chunk, code)
                     if df_d_raw is None or df_d_raw.empty: continue
                     df_d_conf=drop_last_if_incomplete(df_d_raw,"1d",suffix,allow_intraday_daily=False)
@@ -457,7 +481,7 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                     daily_first=bool(df_d["FirstBuySig"].iat[-1]) if not df_d.empty else False
                     weekly_pos = weekly_state_from_daily(df_d_conf, suffix)
                     monthly_first = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                    if apply_triple_filter and not (daily_first and weekly_pos and monthly_first): 
+                    if apply_triple_filter and not (daily_first and weekly_pos and monthly_first):
                         continue
 
                     # بيانات عامة
@@ -470,13 +494,13 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                     t = last_sell_anchor_targets(df_d_conf, pct=0.55)
                     if t is not None: daily_H, daily_t1, daily_t2, daily_t3 = t
 
-                    # أسبوعي: تجميع ثم حساب المرساة بنفس المنهج
+                    # أسبوعي: تجميع صحيح للأسابيع المغلقة فقط ثم حساب المرساة
                     df_w = resample_weekly_from_daily(df_d_conf, suffix)
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
                     t = last_sell_anchor_targets(df_w, pct=0.55)
                     if t is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t
 
-                    # شهري: لإنتاج نص القوة + F:M نعتمد Hm/Lm لآخر شمعة بيعية شهرية معتبرة
+                    # شهري: لإنتاج نص القوة + F:M اعتمادًا على آخر شمعة بيعية شهرية معتبرة
                     df_m = resample_monthly_from_daily(df_d_conf, suffix)
                     monthly_text="لا توجد شمعة بيعية شهرية معتبرة"; fm_value="—"
                     info_m = last_sell_anchor_info(df_m, pct=0.55) if df_m is not None and not df_m.empty else None
@@ -540,4 +564,3 @@ if st.button("🔎 إنشاء جدول الأهداف"):
             )
         else:
             st.info("لا توجد بيانات كافية لحساب الأهداف على الفواصل المحددة.")
-
