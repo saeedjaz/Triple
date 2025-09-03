@@ -1,7 +1,7 @@
 # app.py
 # =========================================================
-# منصة TriplePower - يعرض "جدول الأهداف" فقط (سطر واحد لكل رمز: يومي + أسبوعي)
-# الاختراق الثلاثي اختياري (معطّل افتراضيًا) ويُستخدم فقط كفلتر قبل بناء الجدول.
+# منصة TriplePower - يعرض "جدول الأهداف" فقط (Wide: يومي + أسبوعي)
+# + عمودان في النهاية: القوة والتسارع الشهري ، F:M
 # =========================================================
 
 import os
@@ -21,17 +21,14 @@ import hashlib, secrets, base64  # تشفير كلمات المرور
 # =============================
 load_dotenv()
 SHEET_CSV_URL = os.getenv("SHEET_CSV_URL")
-
-# إيقاف آمن إذا لم يتم ضبط متغير البيئة
 if not SHEET_CSV_URL:
     st.error("⚠️ لم يتم ضبط SHEET_CSV_URL في متغيرات البيئة. أضفه ثم أعد التشغيل.")
     st.stop()
 
 # =============================
-# تهيئة الصفحة العامة + دعم RTL
+# تهيئة الصفحة + RTL
 # =============================
 st.set_page_config(page_title="🎯 جدول الأهداف | TriplePower", layout="wide")
-
 RTL_CSS = """
 <style>
   :root, html, body, .stApp { direction: rtl; }
@@ -58,8 +55,7 @@ def linkify(text: str) -> str:
 def load_important_links() -> str:
     try:
         with open("روابط مهمة.txt", "r", encoding="utf-8") as f:
-            content = f.read()
-        return content
+            return f.read()
     except FileNotFoundError:
         return "⚠️ ملف 'روابط مهمة.txt' غير موجود."
 
@@ -445,11 +441,7 @@ with st.sidebar:
     )
     start_date = st.date_input("من", date(2020, 1, 1))
     end_date   = st.date_input("إلى", date.today())
-
-    allow_intraday_daily = st.checkbox(
-        "👁️ عرض اختراقات اليوم قبل الإغلاق (يومي) — للعرض فقط", value=False
-    )
-
+    allow_intraday_daily = st.checkbox("👁️ عرض اختراقات اليوم قبل الإغلاق (يومي) — للعرض فقط", value=False)
     batch_size = st.slider("حجم الدُفعة عند الجلب", 20, 120, 60, 10)
 
     symbol_name_dict = (
@@ -482,7 +474,7 @@ symbols_input = st.text_area("أدخل الرموز (مفصولة بمسافة �
 symbols = [s.strip() + suffix for s in symbols_input.replace("\n", " ").split() if s.strip()]
 
 # =============================
-# تنفيذ التحليل — نُخرج جدول الأهداف فقط
+# تنفيذ التحليل — جدول الأهداف فقط + أعمدة القوة الشهرية
 # =============================
 if st.button("🔎 إنشاء جدول الأهداف"):
     if not symbols:
@@ -490,7 +482,8 @@ if st.button("🔎 إنشاء جدول الأهداف"):
         st.stop()
 
     with st.spinner("⏳ نجلب البيانات ونحسب الأهداف..."):
-        targets_rows = []  # سنحوّله لاحقًا إلى Wide
+        targets_rows = []          # صفّان (يومي/أسبوعي) لكل رمز -> سنحوّله لاحقًا إلى Wide
+        monthly_power_rows = []    # صف واحد لكل رمز: نصّ القوة الشهرية + قيمة F:M
 
         total = len(symbols)
         prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
@@ -506,34 +499,36 @@ if st.button("🔎 إنشاء جدول الأهداف"):
 
             for code in chunk_syms:
                 try:
+                    # --- استخراج اليومي المؤكد ---
                     df_d_raw = extract_symbol_df(ddata_chunk, code)
                     if df_d_raw is None or df_d_raw.empty:
                         continue
-
                     df_d_conf = drop_last_if_incomplete(df_d_raw, "1d", suffix, allow_intraday_daily=False)
                     if df_d_conf is None or df_d_conf.empty:
                         continue
 
+                    # منطق 55% على اليومي
                     df_d = detect_breakout_with_state(df_d_conf)
                     if df_d is None or df_d.empty:
                         continue
 
-                    # تطبيق الفلتر الاختياري قبل بناء الأهداف
+                    # فلتر اختياري (اختراق يومي + أسبوعي إيجابي + أول شهري)
                     daily_first_break = bool(df_d["FirstBuySig"].iat[-1])
                     weekly_positive   = weekly_state_from_daily(df_d_conf, suffix)
                     monthly_first     = monthly_first_breakout_from_daily(df_d_conf, suffix)
                     if apply_triple_filter and not (daily_first_break and weekly_positive and monthly_first):
                         continue
 
+                    # بيانات عامة
                     last_close = float(df_d["Close"].iat[-1])
                     sym = code.replace(suffix, '').upper()
                     company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:20]
 
-                    # نحسب صفّين للأهداف: يومي + أسبوعي
+                    # --- حساب الأهداف: يومي + أسبوعي ---
                     for tf in ["1d", "1wk"]:
                         df_tf = df_d_conf if tf == "1d" else resample_weekly_from_daily(df_d_conf, suffix)
-                        # حساب مستويات الأهداف
-                        # (نفس الدالة لكن مضمنة هنا لتقليل اعتماد خارجي)
+
+                        # آخر شمعة بيعية معتبرة على الفاصل المحدد
                         def _compute_targets(_df):
                             if _df is None or _df.empty:
                                 return None
@@ -558,26 +553,54 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                         targets_rows.append({
                             "اسم الشركة": company_name,
                             "الرمز": sym,
-                            "سعر الإغلاق": round(last_close, 2),  # إغلاق يومي
+                            "سعر الإغلاق": round(last_close, 2),
                             "الفاصل": {"1d":"يومي","1wk":"أسبوعي"}.get(tf, tf),
                             "بداية الحركة بالإغلاق أعلى": start_above,
                             "الهدف الأول": t1,
                             "الهدف الثاني": t2,
                             "الهدف الثالث": t3,
                         })
+
+                    # --- حساب القوة والتسارع الشهري + F:M ---
+                    df_m = resample_monthly_from_daily(df_d_conf, suffix)
+                    monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
+                    fm_value = "—"
+                    if df_m is not None and not df_m.empty:
+                        df_m = detect_breakout_with_state(df_m)
+                        if "LoseCndl55" in df_m.columns and df_m["LoseCndl55"].any():
+                            idx_m = np.where(df_m["LoseCndl55"].values)[0]
+                            j = int(idx_m[-1])
+                            Hm = float(df_m["High"].iat[j])  # قمة آخر شمعة بيعية شهرية معتبرة
+                            Lm = float(df_m["Low"].iat[j])   # قاعها
+                            if last_close < Hm:
+                                monthly_text = f"غير متواجدة ويجب الإغلاق فوق {Hm:.2f}"
+                                fm_value = f"{Hm:.2f}"
+                            else:
+                                monthly_text = f"متواجدة بشرط الحفاظ على {Lm:.2f}"
+                                fm_value = f"{Lm:.2f}"
+
+                    monthly_power_rows.append({
+                        "اسم الشركة": company_name,
+                        "الرمز": sym,
+                        "سعر الإغلاق": round(last_close, 2),
+                        "القوة والتسارع الشهري": monthly_text,
+                        "F:M": fm_value,
+                    })
+
                 except Exception:
                     continue
 
             processed += len(chunk_syms)
             prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
 
-        # ===== تحويل إلى Wide وعرض جدول الأهداف فقط =====
+        # ===== تحويل أهداف (طولي) إلى Wide ثم دمج أعمدة القوة الشهرية وإظهارها في النهاية =====
         if targets_rows:
             df_targets_long = pd.DataFrame(targets_rows)[
                 ["اسم الشركة","الرمز","سعر الإغلاق","الفاصل",
                  "بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]
             ]
 
+            # Pivot -> Wide
             df_wide = df_targets_long.pivot_table(
                 index=["اسم الشركة","الرمز","سعر الإغلاق"],
                 columns="الفاصل",
@@ -587,30 +610,45 @@ if st.button("🔎 إنشاء جدول الأهداف"):
             df_wide.columns = [f"{metric} ({tf})" for metric, tf in df_wide.columns.to_flat_index()]
             df_wide = df_wide.reset_index()
 
-            desired_cols = [
-                "اسم الشركة","الرمز","سعر الإغلاق",
-                "بداية الحركة بالإغلاق أعلى (يومي)","الهدف الأول (يومي)","الهدف الثاني (يومي)","الهدف الثالث (يومي)",
-                "بداية الحركة بالإغلاق أعلى (أسبوعي)","الهدف الأول (أسبوعي)","الهدف الثاني (أسبوعي)","الهدف الثالث (أسبوعي)",
-            ]
-            desired_cols = [c for c in desired_cols if c in df_wide.columns]
-            df_wide = df_wide[desired_cols]
-
+            # تنسيق الأرقام
             for col in df_wide.columns:
                 if col == "سعر الإغلاق" or col.startswith("بداية الحركة") or col.startswith("الهدف"):
                     df_wide[col] = df_wide[col].map(_fmt_num)
 
+            # دمج القوة الشهرية + F:M
+            df_monthly_cols = pd.DataFrame(monthly_power_rows)[
+                ["اسم الشركة","الرمز","سعر الإغلاق","القوة والتسارع الشهري","F:M"]
+            ]
+            df_final = pd.merge(
+                df_wide, df_monthly_cols,
+                on=["اسم الشركة","الرمز","سعر الإغلاق"], how="left"
+            )
+
+            # ترتيب الأعمدة: (الأساسية) + (يومي) + (أسبوعي) + في النهاية القوة الشهرية و F:M
+            ordered = [
+                "اسم الشركة","الرمز","سعر الإغلاق",
+                "بداية الحركة بالإغلاق أعلى (يومي)","الهدف الأول (يومي)","الهدف الثاني (يومي)","الهدف الثالث (يومي)",
+                "بداية الحركة بالإغلاق أعلى (أسبوعي)","الهدف الأول (أسبوعي)","الهدف الثاني (أسبوعي)","الهدف الثالث (أسبوعي)",
+                "القوة والتسارع الشهري","F:M"
+            ]
+            existing = [c for c in ordered if c in df_final.columns]
+            # أضف أي أعمدة أخرى غير مرتبة (احتياطًا)
+            existing += [c for c in df_final.columns if c not in existing]
+            df_final = df_final[existing]
+
+            # عنوان
             market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
             day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
             filt_note = "— فلترة بالاختراق مفعّلة" if apply_triple_filter else "— بدون اشتراط الاختراق"
-            st.subheader(f"🎯 جدول الأهداف ({market_name}) — {day_str} — عدد الرموز: {len(df_wide)} {filt_note}")
+            st.subheader(f"🎯 جدول الأهداف ({market_name}) — {day_str} — عدد الرموز: {len(df_final)} {filt_note}")
 
-            html_targets = generate_targets_html_table_wide(df_wide)
+            html_targets = generate_targets_html_table_wide(df_final)
             st.markdown(html_targets, unsafe_allow_html=True)
 
             st.download_button(
                 "📥 تنزيل جدول الأهداف CSV",
-                df_wide.to_csv(index=False).encode("utf-8-sig"),
-                file_name="TriplePower_Targets_Wide.csv",
+                df_final.to_csv(index=False).encode("utf-8-sig"),
+                file_name="TriplePower_Targets_Wide_WithMonthlyPower.csv",
                 mime="text/csv"
             )
         else:
