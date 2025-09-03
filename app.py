@@ -1,11 +1,12 @@
 # app.py
 # =========================================================
-# منصة TriplePower - جدول الأهداف فقط (Wide: يومي + أسبوعي)
-# - الأسبوعي مطابق لليومي في اختيار الشمعة البيعية "بنفسها أو ما بعدها"
-# - بداية الحركة (أسبوعي) تُرفع لتكون >= قمة الشمعة البيعية الشهرية المعتبرة (إن وُجدت)
+# منصة TriplePower - جدول الأهداف (Wide: يومي + أسبوعي)
+# - "بداية الحركة (أسبوعي)" >= قمة آخر شمعة بيعية شهرية معتبرة (بوابة شهرية)
+# - الأهداف الأسبوعية تُبنى على مدى الشمعة الأسبوعية فقط
 # - عمودا "القوة والتسارع الشهري" و "F:M"
-# - استبعاد الأسبوع/الشهر الجاريين غير المغلقين
+# - إسقاط الأسبوع الجاري غير المغلق (KSA: الخميس) والشهر الجاري غير المغلق
 # - إصلاح الدمج بأنواع الأعمدة
+# - اختيار "الشمعة البيعية المعتبرة" (بنفسها أو ما بعدها) وفق TriplePower
 # =========================================================
 
 import os, re, hashlib, secrets, base64
@@ -195,8 +196,8 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFr
 
     state = 0
     states, first_buy = [], []
-    lose_high_55_const = np.nan
-    win_low_55_const   = np.nan
+    lose_high_55_const = np.nan  # قمة آخر شمعة بيعية معتبرة
+    win_low_55_const   = np.nan  # قاع آخر شمعة رابحة 55%
 
     for i in range(len(df)):
         buy_sig  = (state == 0) and (not np.isnan(lose_high_55_const)) and (c[i] > lose_high_55_const)
@@ -218,42 +219,60 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFr
     df["WinCndl55"]  = win55
     return df
 
-# === اختيار "آخر شمعة بيعية 55%" التي كسرت (بنفسها أو ما بعدها) قاع آخر شمعة شرائية 55% ===
+# --- اختيار آخر شمعة بيعية 55% "بنفسها أو ما بعدها" ---
 def last_considered_sell_index(df: pd.DataFrame, pct: float = 0.55):
+    """
+    تُعيد مؤشر آخر شمعة بيعية 55% التي كُسر بعدها (بنفسها أو ما بعدها) قاع آخر شمعة شرائية 55%.
+    """
     if df is None or df.empty:
         return None
+
     o = df["Open"].to_numpy(dtype=float)
     h = df["High"].to_numpy(dtype=float)
     l = df["Low"].to_numpy(dtype=float)
     c = df["Close"].to_numpy(dtype=float)
+
     rng = h - l
     with np.errstate(divide="ignore", invalid="ignore"):
         br = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+
     lose55 = (c < o) & (br >= pct) & (rng != 0)
     win55  = (c > o) & (br >= pct) & (rng != 0)
+
+    # قاع آخر شمعة شرائية 55% قبل كل i
     prev_win_low = np.full_like(l, np.nan, dtype=float)
     last_low = np.nan
     for i in range(len(l)):
         prev_win_low[i] = last_low
         if win55[i]:
             last_low = l[i]
+
+    # أدنى Low من i وحتى النهاية (للتحقق من "كسر ما بعدها")
     fwd_min_low = np.empty_like(l)
     cur_min = np.inf
     for i in range(len(l) - 1, -1, -1):
         cur_min = min(cur_min, l[i])
         fwd_min_low[i] = cur_min
-    considered = (c < o) & (br >= pct) & (rng != 0) & ~np.isnan(prev_win_low) & (fwd_min_low <= prev_win_low)
-    idx = np.where(considered)[0]
-    if len(idx) == 0:
-        return None
-    return int(idx[-1])
 
-def last_considered_sell_HL(df: pd.DataFrame, pct: float = 0.55):
-    """يعيد (H, L) لآخر شمعة بيعية معتبرة 'بنفسها أو ما بعدها'."""
-    j = last_considered_sell_index(df, pct=pct)
+    considered = (c < o) & (np.where(rng != 0, np.abs(c - o) / rng, 0.0) >= pct) & (rng != 0) \
+                 & ~np.isnan(prev_win_low) & (fwd_min_low <= prev_win_low)
+
+    idx = np.where(considered)[0]
+    return int(idx[-1]) if len(idx) else None
+
+def get_last_sell_info(df_tf: pd.DataFrame):
+    """
+    يعيد (H, L, R) لآخر شمعة بيعية معتبرة 55% "بنفسها أو ما بعدها" على نفس الفاصل.
+    """
+    if df_tf is None or df_tf.empty:
+        return None
+    j = last_considered_sell_index(df_tf, pct=0.55)
     if j is None:
         return None
-    return float(df["High"].iat[j]), float(df["Low"].iat[j])
+    H = float(df_tf["High"].iat[j]); L = float(df_tf["Low"].iat[j]); R = H - L
+    if not np.isfinite(R) or R <= 0:
+        return None
+    return H, L, R
 
 # =============================
 # تجميع أسبوعي/شهري (مع إسقاط غير المغلق)
@@ -271,13 +290,16 @@ def _is_current_week_closed(suffix: str):
     return closed, week_end_date
 
 def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """أسبوعي مؤكد من اليومي + إسقاط الأسبوع الجاري إذا لم يُغلق."""
     if df_daily is None or df_daily.empty: return df_daily.iloc[0:0]
     df_daily = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
     if df_daily.empty: return df_daily.iloc[0:0]
+
     dfw = df_daily[["Date","Open","High","Low","Close"]].dropna().copy()
     dfw.set_index("Date", inplace=True)
     rule = "W-THU" if suffix == ".SR" else "W-FRI"
     dfw = dfw.resample(rule).agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().reset_index()
+
     is_closed, week_end = _is_current_week_closed(suffix)
     if not is_closed and not dfw.empty:
         if pd.to_datetime(dfw["Date"].iat[-1]).date() == week_end:
@@ -298,27 +320,32 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataF
     return dfm
 
 # =============================
-# حساب البداية والأهداف (موحّد للفواصل) + ربط الأسبوعي بالشهري
+# حساب البداية والأهداف (يومي/أسبوعي)
 # =============================
-def compute_start_and_targets_any_tf(df_tf: pd.DataFrame, anchor_override: float | None = None):
-    """
-    - يختار آخر شمعة بيعية معتبرة 'بنفسها أو ما بعدها' (على نفس الفاصل).
-    - البداية = max(H, anchor_override) إذا تم تمرير anchor_override (للاسبوعي مع شهري).
-    - الأهداف = البداية + n*(H - L) بنفس عرض الشمعة الأسبوعية/اليومية.
-    """
-    if df_tf is None or df_tf.empty:
-        return None
-    j = last_considered_sell_index(df_tf, pct=0.55)
-    if j is None:
-        return None
-    H = float(df_tf["High"].iat[j])
-    L = float(df_tf["Low"].iat[j])
-    R = H - L
-    if not np.isfinite(R) or R <= 0:
-        return None
+def compute_daily_targets(df_d_conf: pd.DataFrame):
+    info = get_last_sell_info(df_d_conf)
+    if info is None: return None
+    H, L, R = info
+    start = H
+    return round(start,2), round(start+R,2), round(start+2*R,2), round(start+3*R,2)
 
-    anchor = H if anchor_override is None else max(H, float(anchor_override))
-    return round(anchor, 2), round(anchor + R, 2), round(anchor + 2*R, 2), round(anchor + 3*R, 2)
+def compute_weekly_targets_with_monthly_gate(df_w: pd.DataFrame, df_m: pd.DataFrame):
+    """
+    بداية الحركة (أسبوعي) = max(H_w, H_m) حيث:
+      - (H_w, L_w, R_w) من آخر شمعة بيعية أسبوعية معتبرة
+      - H_m من آخر شمعة بيعية شهرية معتبرة (إن وُجدت)
+    الأهداف = Start + n*R_w (باستخدام مدى الشمعة الأسبوعية فقط)
+    """
+    w_info = get_last_sell_info(df_w)
+    if w_info is None: return None
+    H_w, L_w, R_w = w_info
+    H_m = None
+    if df_m is not None and not df_m.empty:
+        m_info = get_last_sell_info(df_m)
+        if m_info is not None:
+            H_m = m_info[0]
+    start = max(H_w, H_m) if H_m is not None else H_w
+    return round(start,2), round(start+R_w,2), round(start+2*R_w,2), round(start+3*R_w,2)
 
 # =============================
 # HTML للجدول العريض
@@ -465,8 +492,8 @@ if st.button("🔎 إنشاء جدول الأهداف"):
         st.warning("⚠️ الرجاء إدخال رموز أولًا."); st.stop()
 
     with st.spinner("⏳ نجلب البيانات ونحسب الأهداف..."):
-        targets_rows = []
-        monthly_power_rows = []
+        targets_rows = []       # صفوف طولي (يومي/أسبوعي) لكل رمز -> Pivot إلى Wide
+        monthly_power_rows = [] # لكل رمز: القوة الشهرية + F:M
 
         total = len(symbols)
         prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
@@ -489,49 +516,34 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                     df_d_conf = drop_last_if_incomplete(df_d_raw, "1d", suffix, allow_intraday_daily=False)
                     if df_d_conf is None or df_d_conf.empty: continue
 
-                    # لتطبيق فلاتر الاختيار (اختياري)
-                    df_d = detect_breakout_with_state(df_d_conf)
-                    if df_d is None or df_d.empty: continue
-
-                    # فواصل أعلى
+                    # فواصل مشتقة
                     df_w = resample_weekly_from_daily(df_d_conf, suffix)
                     df_m = resample_monthly_from_daily(df_d_conf, suffix)
 
                     # فلتر اختياري: يومي + أسبوعي إيجابي + أول شهري
-                    daily_first_break = bool(df_d["FirstBuySig"].iat[-1])
+                    df_d_state = detect_breakout_with_state(df_d_conf.copy())
+                    daily_first_break = bool(df_d_state["FirstBuySig"].iat[-1])
+
                     weekly_positive = False
                     if not df_w.empty:
                         df_w_state = detect_breakout_with_state(df_w.copy())
                         weekly_positive = bool(df_w_state["State"].iat[-1] == 1)
+
                     monthly_first = False
                     if not df_m.empty:
                         df_m_state = detect_breakout_with_state(df_m.copy())
                         monthly_first = bool(df_m_state["FirstBuySig"].iat[-1])
+
                     if apply_triple_filter and not (daily_first_break and weekly_positive and monthly_first):
                         continue
 
                     # بيانات عامة
-                    last_close = float(df_d["Close"].iat[-1])
+                    last_close = float(df_d_conf["Close"].iat[-1])
                     sym = code.replace(suffix, '').upper()
                     company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:20]
 
-                    # ---- (A) حساب Hm,Lm الشهرية لاستخدامها كـ anchor للأسبوعي + القوة الشهرية ----
-                    Hm = Lm = None
-                    monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
-                    fm_value = np.nan
-                    if df_m is not None and not df_m.empty:
-                        HLm = last_considered_sell_HL(df_m)
-                        if HLm is not None:
-                            Hm, Lm = HLm
-                            if last_close < Hm:
-                                monthly_text = f"غير متواجدة ويجب الإغلاق فوق {Hm:.2f}"
-                                fm_value = Hm
-                            else:
-                                monthly_text = f"متواجدة بشرط الحفاظ على {Lm:.2f}"
-                                fm_value = Lm
-
-                    # ---- (B) أهداف اليومي - المنطق الموحد (بدون anchor) ----
-                    tp_d = compute_start_and_targets_any_tf(df_d_conf, anchor_override=None)
+                    # ---- (1) أهداف اليومي ----
+                    tp_d = compute_daily_targets(df_d_conf)
                     if tp_d is not None:
                         d_start, d_t1, d_t2, d_t3 = tp_d
                     else:
@@ -548,9 +560,8 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                         "الهدف الثالث": d_t3,
                     })
 
-                    # ---- (C) أهداف الأسبوعي - نفس المنطق لكن anchor_override = Hm (إن وُجد) ----
-                    anchor_for_weekly = Hm if Hm is not None else None
-                    tp_w = compute_start_and_targets_any_tf(df_w, anchor_override=anchor_for_weekly)
+                    # ---- (2) أهداف الأسبوعي مع بوابة شهرية ----
+                    tp_w = compute_weekly_targets_with_monthly_gate(df_w, df_m)
                     if tp_w is not None:
                         w_start, w_t1, w_t2, w_t3 = tp_w
                     else:
@@ -567,13 +578,25 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                         "الهدف الثالث": w_t3,
                     })
 
-                    # ---- (D) القوة والتسارع الشهري + F:M ----
+                    # ---- (3) القوة والتسارع الشهري + F:M ----
+                    monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
+                    fm_value = np.nan
+                    if df_m is not None and not df_m.empty:
+                        df_m2 = detect_breakout_with_state(df_m.copy())
+                        if "LoseCndl55" in df_m2.columns and df_m2["LoseCndl55"].any():
+                            idx_m = np.where(df_m2["LoseCndl55"].values)[0]; j = int(idx_m[-1])
+                            Hm = float(df_m2["High"].iat[j]); Lm = float(df_m2["Low"].iat[j])
+                            if last_close < Hm:
+                                monthly_text = f"غير متواجدة ويجب الإغلاق فوق {Hm:.2f}"; fm_value = Hm
+                            else:
+                                monthly_text = f"متواجدة بشرط الحفاظ على {Lm:.2f}"; fm_value = Lm
+
                     monthly_power_rows.append({
                         "اسم الشركة": company_name,
                         "الرمز": sym,
                         "سعر الإغلاق": round(last_close, 2),
                         "القوة والتسارع الشهري": monthly_text,
-                        "F:M": fm_value if isinstance(fm_value, float) else (fm_value if fm_value == "—" else fm_value),
+                        "F:M": fm_value,
                     })
 
                 except Exception:
