@@ -1,4 +1,9 @@
 # app.py
+# =========================================================
+# منصة TriplePower - جدول الأهداف بنمط الصورة + عرض شامل للرموز
+# الافتراضي: لا يُشترط الاختراق؛ يمكن تفعيل فلتر الاختراق الثلاثي اختياريًا
+# =========================================================
+
 import os
 import re
 from dotenv import load_dotenv
@@ -317,7 +322,6 @@ def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFr
 
     # حذف الأسبوع الجاري إن لم يُغلق حسب البيانات
     if not _week_is_closed_by_data(df_daily, suffix) and not dfw.empty:
-        # تاريخ نهاية الأسبوع الأخير في السلسلة
         dfw = dfw.iloc[:-1]
     return dfw
 
@@ -442,8 +446,14 @@ def compute_tp_targets_from_last_sell(df_tf: pd.DataFrame) -> tuple[float, float
     t3 = round(H + 3 * R, 2)
     return start_above, t1, t2, t3
 
+def _fmt_num(x):
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return "—"
+
 def generate_targets_html_table(df: pd.DataFrame) -> str:
-    """جدول HTML مُلوَّن كما في الصورة."""
+    """جدول HTML مُلوَّن كما في الصورة، ويتحمّل نقص الأرقام."""
     html = """
     <style>
       table {border-collapse: collapse; width: 100%; direction: rtl; font-family: Arial, sans-serif;}
@@ -456,20 +466,25 @@ def generate_targets_html_table(df: pd.DataFrame) -> str:
     </style>
     <table><thead><tr>
     """
+    from html import escape as _esc
     for col in df.columns:
-        html += f"<th>{escape(col)}</th>"
+        html += f"<th>{_esc(str(col))}</th>"
     html += "</tr></thead><tbody>"
 
     for _, r in df.iterrows():
-        start_val = float(r["بداية الحركة بالإغلاق أعلى"])
-        cur_close = float(r["سعر الإغلاق"])
-        cls = "positive" if cur_close >= start_val else "negative"
+        # تلوين خانة "بداية الحركة" فقط إذا كانت رقمية
+        try:
+            start_val = float(r["بداية الحركة بالإغلاق أعلى"])
+            cur_close = float(r["سعر الإغلاق"])
+            row_cls = "positive" if cur_close >= start_val else "negative"
+        except Exception:
+            row_cls = ""
 
         html += "<tr>"
         for col in df.columns:
             val = r[col]
-            cell_cls = cls if col == "بداية الحركة بالإغلاق أعلى" else ""
-            html += f'<td class="{cell_cls}">{escape(str(val))}</td>'
+            cell_cls = row_cls if col == "بداية الحركة بالإغلاق أعلى" else ""
+            html += f'<td class="{cell_cls}">{_esc(str(val))}</td>'
         html += "</tr>"
     html += "</tbody></table>"
     return html
@@ -596,6 +611,13 @@ with st.sidebar:
     # هذا الفاصل يُستخدم لحساب جدول الأهداف مثل الصورة
     interval = st.sidebar.selectbox("الفاصل لحساب الأهداف", ["1d", "1wk", "1mo"], index=0,
                                     help="هذا الفاصل لا يؤثر على فلترة الاختراق الثلاثي، بل على جدول الأهداف فقط.")
+    # خيار اختياري لاشتراط الاختراق الثلاثي
+    apply_triple_filter = st.sidebar.checkbox(
+        "اشتراط الاختراق الثلاثي (اختياري)",
+        value=False,
+        help="عند التفعيل: تُعرض فقط الرموز التي تحقق (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري). عند التعطيل: تُعرض كل الرموز."
+    )
+
     start_date = st.sidebar.date_input("من", date(2020, 1, 1))
     end_date = st.sidebar.date_input("إلى", date.today())
 
@@ -645,7 +667,7 @@ if st.button("🔎 تنفيذ التحليل"):
         st.warning("⚠️ الرجاء إدخال رموز أولًا.")
         st.stop()
 
-    with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر لكل الرموز..."):
+    with st.spinner("⏳ نجلب البيانات ونحسب الشروط والأهداف..."):
         results = []
         targets_rows = []
 
@@ -684,28 +706,22 @@ if st.button("🔎 تنفيذ التحليل"):
                     if df_d is None or df_d.empty:
                         continue
 
-                    # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية معتبرة 55% (إغلاق يومي)
-                    daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
-                    if not daily_first_breakout:
-                        continue
+                    # حالات الفواصل (لا نفلتر عليها إلا إذا طُلب)
+                    daily_positive    = bool(df_d["State"].iat[-1] == 1)
+                    daily_first_break = bool(df_d["FirstBuySig"].iat[-1])
+                    weekly_positive   = weekly_state_from_daily(df_d_conf, suffix)
+                    monthly_first     = monthly_first_breakout_from_daily(df_d_conf, suffix)
 
-                    # (2) شرط الأسبوعي: إيجابي
-                    weekly_positive = weekly_state_from_daily(df_d_conf, suffix)
-                    if not weekly_positive:
-                        continue
+                    # تطبيق الفلتر الاختياري (إن تم تفعيله)
+                    if apply_triple_filter:
+                        if not (daily_first_break and weekly_positive and monthly_first):
+                            continue  # تجاهل هذا الرمز عند الفلترة الصارمة
 
-                    # (3) شرط الشهري: "أول اختراق فقط"
-                    monthly_first = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                    if not monthly_first:
-                        continue
-
-                    # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
-                    daily_positive = (df_d["State"].iat[-1] == 1)
+                    # بيانات العرض
                     last_close = float(df_d["Close"].iat[-1])
-
                     sym = code.replace(suffix, '').upper()
                     company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:20]
-                    tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
+                    tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym
                     url = f"https://www.tradingview.com/symbols/{tv}/"
 
                     results.append(
@@ -732,16 +748,19 @@ if st.button("🔎 تنفيذ التحليل"):
                     tp = compute_tp_targets_from_last_sell(df_tf)
                     if tp is not None:
                         start_above, t1, t2, t3 = tp
-                        targets_rows.append({
-                            "اسم الشركة": company_name,
-                            "الرمز": sym,
-                            "سعر الإغلاق": round(last_close, 2),
-                            "الفاصل": TF_LABELS.get(interval, interval),
-                            "بداية الحركة بالإغلاق أعلى": start_above,
-                            "الهدف الأول": t1,
-                            "الهدف الثاني": t2,
-                            "الهدف الثالث": t3,
-                        })
+                    else:
+                        start_above = t1 = t2 = t3 = "—"  # لا توجد شمعة بيعية معتبرة على هذا الفاصل
+
+                    targets_rows.append({
+                        "اسم الشركة": company_name,
+                        "الرمز": sym,
+                        "سعر الإغلاق": round(last_close, 2),
+                        "الفاصل": {"1d":"يومي","1wk":"أسبوعي","1mo":"شهري"}.get(interval, interval),
+                        "بداية الحركة بالإغلاق أعلى": start_above,
+                        "الهدف الأول": t1,
+                        "الهدف الثاني": t2,
+                        "الهدف الثالث": t3,
+                    })
 
                 except Exception:
                     continue
@@ -749,7 +768,7 @@ if st.button("🔎 تنفيذ التحليل"):
             processed += len(chunk_syms)
             prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
 
-        # ===== عرض النتائج =====
+        # ===== جدول الرموز =====
         if results:
             df_results = pd.DataFrame(results)[
                 ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
@@ -760,14 +779,15 @@ if st.button("🔎 تنفيذ التحليل"):
             # تنسيق السعر
             df_results["سعر الإغلاق"] = df_results["سعر الإغلاق"].map(lambda x: f"{x:,.2f}")
 
-            # ===== العنوان الديناميكي أعلى الجدول =====
+            # ===== العنوان الديناميكي =====
             market_name = "السوق السعودي" if suffix == ".SR" else "السوق الأمريكي"
             day_str = f"{end_date.day}-{end_date.month}-{end_date.year}"
             tf_label_map = {"1d": "اليومي (D)", "1wk": "الأسبوعي (W)", "1mo": "الشهري (M)"}
             tf_label = tf_label_map.get(interval, str(interval))
+            filt_note = "— فلترة بالاختراق مفعّلة" if apply_triple_filter else "— بدون اشتراط الاختراق"
 
             with st.container():
-                st.subheader(f"اختراق (TD) — {market_name} — {tf_label} — {day_str} — العدد: {len(df_results)}")
+                st.subheader(f"نتائج ({market_name}) — {tf_label} — {day_str} — العدد: {len(df_results)} {filt_note}")
                 html_out = generate_html_table(df_results)
                 st.markdown(html_out, unsafe_allow_html=True)
 
@@ -786,16 +806,16 @@ if st.button("🔎 تنفيذ التحليل"):
                     mime="text/html"
                 )
         else:
-            st.info("🔎 لا توجد رموز تحقق الشروط (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري).")
+            st.info("لا توجد رموز ضمن قائمتك لعرضها (تحقق من الإدخال أو من توفر البيانات).")
 
         # ===== جدول الأهداف بنمط الصورة =====
         if targets_rows:
             df_targets = pd.DataFrame(targets_rows)[
                 ["اسم الشركة","الرمز","سعر الإغلاق","الفاصل","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]
             ]
-            # تنسيق الأرقام
+            # تنسيق الأرقام مع تحمّل الفراغ
             for col in ["سعر الإغلاق","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]:
-                df_targets[col] = df_targets[col].map(lambda x: f"{float(x):.2f}")
+                df_targets[col] = df_targets[col].map(_fmt_num)
 
             st.markdown("### 🎯 جدول الأهداف (TriplePower) — نمط الصورة")
             html_targets = generate_targets_html_table(df_targets)
