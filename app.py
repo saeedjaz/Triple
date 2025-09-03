@@ -1,6 +1,6 @@
 # app.py
 # =========================================================
-# منصة TriplePower - جدول الأهداف بنمط الصورة (صفّان: يومي + أسبوعي)
+# منصة TriplePower - جدول الأهداف (سطر واحد لكل رمز: يومي + أسبوعي)
 # الافتراضي: لا يُشترط الاختراق؛ يمكن تفعيل فلتر الاختراق الثلاثي اختياريًا
 # =========================================================
 
@@ -405,17 +405,8 @@ def generate_html_table(df: pd.DataFrame) -> str:
     return html
 
 # =============================
-# جدول الأهداف (نمط الصورة)
+# جدول الأهداف (Wide: سطر واحد لكل رمز)
 # =============================
-
-TF_LABELS = {"1d": "يومي", "1wk": "أسبوعي", "1mo": "شهري"}
-
-def _last_valid_sell55_idx(df: pd.DataFrame) -> int | None:
-    """آخر شمعة بيعية معتبرة 55% (مؤشر الصف)."""
-    if df is None or df.empty or "LoseCndl55" not in df.columns:
-        return None
-    idx = np.where(df["LoseCndl55"].values)[0]
-    return int(idx[-1]) if len(idx) else None
 
 def compute_tp_targets_from_last_sell(df_tf: pd.DataFrame) -> tuple[float, float, float, float] | None:
     """
@@ -430,9 +421,12 @@ def compute_tp_targets_from_last_sell(df_tf: pd.DataFrame) -> tuple[float, float
             return None
 
     df_tf = detect_breakout_with_state(df_tf)  # يضيف LoseCndl55
-    i = _last_valid_sell55_idx(df_tf)
-    if i is None:
+    if df_tf is None or df_tf.empty or "LoseCndl55" not in df_tf.columns:
         return None
+    idx = np.where(df_tf["LoseCndl55"].values)[0]
+    if len(idx) == 0:
+        return None
+    i = int(idx[-1])
 
     H = float(df_tf["High"].iat[i])
     L = float(df_tf["Low"].iat[i])
@@ -452,8 +446,8 @@ def _fmt_num(x):
     except Exception:
         return "—"
 
-def generate_targets_html_table(df: pd.DataFrame) -> str:
-    """جدول HTML مُلوَّن كما في الصورة، ويتحمّل نقص الأرقام."""
+def generate_targets_html_table_wide(df: pd.DataFrame) -> str:
+    """جدول HTML (Wide) يلوّن كل عمود 'بداية الحركة...' اعتمادًا على سعر الإغلاق."""
     html = """
     <style>
       table {border-collapse: collapse; width: 100%; direction: rtl; font-family: Arial, sans-serif;}
@@ -471,19 +465,26 @@ def generate_targets_html_table(df: pd.DataFrame) -> str:
         html += f"<th>{_esc(str(col))}</th>"
     html += "</tr></thead><tbody>"
 
+    # الأعمدة التي نلوّنها
+    color_cols = [c for c in df.columns if c.startswith("بداية الحركة بالإغلاق أعلى")]
+
     for _, r in df.iterrows():
-        # تلوين خانة "بداية الحركة" فقط إذا كانت رقمية
+        # قراءة سعر الإغلاق
         try:
-            start_val = float(r["بداية الحركة بالإغلاق أعلى"])
-            cur_close = float(r["سعر الإغلاق"])
-            row_cls = "positive" if cur_close >= start_val else "negative"
+            close_val = float(str(r["سعر الإغلاق"]).replace(",", ""))
         except Exception:
-            row_cls = ""
+            close_val = None
 
         html += "<tr>"
         for col in df.columns:
             val = r[col]
-            cell_cls = row_cls if col == "بداية الحركة بالإغلاق أعلى" else ""
+            cell_cls = ""
+            if close_val is not None and col in color_cols:
+                try:
+                    start_val = float(str(val).replace(",", ""))
+                    cell_cls = "positive" if close_val >= start_val else "negative"
+                except Exception:
+                    cell_cls = ""
             html += f'<td class="{cell_cls}">{_esc(str(val))}</td>'
         html += "</tr>"
     html += "</tbody></table>"
@@ -634,7 +635,7 @@ with st.sidebar:
     )
 
     if st.sidebar.button("🎯 رموز تجريبية"):
-        st.session_state.symbols = "1120 2380 1050" if suffix == ".SR" else "AAPL MSFT GOOGL"
+        st.session_state.symbols = "1010 1020 1030" if suffix == ".SR" else "AAPL MSFT GOOGL"
     try:
         with open("رموز الاسواق العالمية.xlsx", "rb") as file:
             st.sidebar.download_button(
@@ -666,7 +667,7 @@ if st.button("🔎 تنفيذ التحليل"):
 
     with st.spinner("⏳ نجلب البيانات ونحسب الشروط والأهداف..."):
         results = []
-        targets_rows = []
+        targets_rows = []   # شكل طولي: صفان (يومي/أسبوعي) لكل رمز ثم سنحوّله لجدول عريض
 
         total = len(symbols)
         prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
@@ -734,15 +735,12 @@ if st.button("🔎 تنفيذ التحليل"):
                         }
                     )
 
-                    # ===== جدول الأهداف: صفّان (يومي + أسبوعي) =====
-                    intervals_for_targets = ["1d", "1wk"]  # أضِف "1mo" لو أردت صفًا شهريًا أيضًا
-                    for tf in intervals_for_targets:
+                    # ===== جدول الأهداف: نولّد صفين (يومي + أسبوعي) لكل رمز =====
+                    for tf in ["1d", "1wk"]:
                         if tf == "1d":
                             df_tf = df_d_conf.copy()
-                        elif tf == "1wk":
-                            df_tf = resample_weekly_from_daily(df_d_conf, suffix)
                         else:
-                            df_tf = resample_monthly_from_daily(df_d_conf, suffix)
+                            df_tf = resample_weekly_from_daily(df_d_conf, suffix)
 
                         tp = compute_tp_targets_from_last_sell(df_tf)
                         if tp is not None:
@@ -753,8 +751,8 @@ if st.button("🔎 تنفيذ التحليل"):
                         targets_rows.append({
                             "اسم الشركة": company_name,
                             "الرمز": sym,
-                            "سعر الإغلاق": round(last_close, 2),  # نعرض الإغلاق اليومي كما في المثال
-                            "الفاصل": {"1d":"يومي","1wk":"أسبوعي","1mo":"شهري"}.get(tf, tf),
+                            "سعر الإغلاق": round(last_close, 2),  # إغلاق يومي
+                            "الفاصل": {"1d":"يومي","1wk":"أسبوعي"}.get(tf, tf),
                             "بداية الحركة بالإغلاق أعلى": start_above,
                             "الهدف الأول": t1,
                             "الهدف الثاني": t2,
@@ -805,29 +803,47 @@ if st.button("🔎 تنفيذ التحليل"):
         else:
             st.info("لا توجد رموز ضمن قائمتك لعرضها (تحقق من الإدخال أو من توفر البيانات).")
 
-        # ===== جدول الأهداف بنمط الصورة =====
+        # ===== جدول الأهداف (Wide: سطر واحد لكل رمز - يومي + أسبوعي) =====
         if targets_rows:
-            df_targets = pd.DataFrame(targets_rows)[
-                ["اسم الشركة","الرمز","سعر الإغلاق","الفاصل","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]
+            df_targets_long = pd.DataFrame(targets_rows)[
+                ["اسم الشركة","الرمز","سعر الإغلاق","الفاصل",
+                 "بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]
             ]
-            # ترتيب: يومي ثم أسبوعي لكل رمز
-            order_map = {"يومي": 0, "أسبوعي": 1, "شهري": 2}
-            df_targets["_ord"] = df_targets["الفاصل"].map(order_map).fillna(9)
-            df_targets = df_targets.sort_values(["الرمز", "_ord"]).drop(columns="_ord").reset_index(drop=True)
+
+            # Pivot -> Wide
+            df_wide = df_targets_long.pivot_table(
+                index=["اسم الشركة","الرمز","سعر الإغلاق"],
+                columns="الفاصل",
+                values=["بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"],
+                aggfunc="first"
+            )
+            # تسطيح أسماء الأعمدة
+            df_wide.columns = [f"{metric} ({tf})" for metric, tf in df_wide.columns.to_flat_index()]
+            df_wide = df_wide.reset_index()
+
+            # ترتيب الأعمدة: يومي ثم أسبوعي
+            desired_cols = [
+                "اسم الشركة","الرمز","سعر الإغلاق",
+                "بداية الحركة بالإغلاق أعلى (يومي)","الهدف الأول (يومي)","الهدف الثاني (يومي)","الهدف الثالث (يومي)",
+                "بداية الحركة بالإغلاق أعلى (أسبوعي)","الهدف الأول (أسبوعي)","الهدف الثاني (أسبوعي)","الهدف الثالث (أسبوعي)",
+            ]
+            desired_cols = [c for c in desired_cols if c in df_wide.columns]
+            df_wide = df_wide[desired_cols]
 
             # تنسيق الأرقام مع تحمّل الفراغ
-            for col in ["سعر الإغلاق","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]:
-                df_targets[col] = df_targets[col].map(_fmt_num)
+            for col in df_wide.columns:
+                if col == "سعر الإغلاق" or col.startswith("بداية الحركة") or col.startswith("الهدف"):
+                    df_wide[col] = df_wide[col].map(_fmt_num)
 
-            st.markdown("### 🎯 جدول الأهداف (TriplePower) — يومي + أسبوعي")
-            html_targets = generate_targets_html_table(df_targets)
+            st.markdown("### 🎯 جدول الأهداف (سطر واحد لكل رمز: يومي + أسبوعي)")
+            html_targets = generate_targets_html_table_wide(df_wide)
             st.markdown(html_targets, unsafe_allow_html=True)
 
             # تنزيل
             st.download_button(
                 "📥 تنزيل جدول الأهداف CSV",
-                df_targets.to_csv(index=False).encode("utf-8-sig"),
-                file_name="TriplePower_Targets.csv",
+                df_wide.to_csv(index=False).encode("utf-8-sig"),
+                file_name="TriplePower_Targets_Wide.csv",
                 mime="text/csv"
             )
         else:
