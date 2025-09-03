@@ -2,6 +2,7 @@
 # =========================================================
 # منصة TriplePower - يعرض "جدول الأهداف" فقط (Wide: يومي + أسبوعي)
 # + عمودان في النهاية: القوة والتسارع الشهري ، F:M
+# الأهداف تبدأ من قمة الشمعة البيعية المعتبرة (t1 = H, t2 = H+R, t3 = H+2R)
 # (يتضمن إصلاح الدمج لمنع ValueError باختلاف أنواع الأعمدة)
 # =========================================================
 
@@ -529,6 +530,7 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                     for tf in ["1d", "1wk"]:
                         df_tf = df_d_conf if tf == "1d" else resample_weekly_from_daily(df_d_conf, suffix)
 
+                        # الأهداف تبدأ من القمة: t1=H, t2=H+R, t3=H+2R
                         def _compute_targets(_df):
                             if _df is None or _df.empty:
                                 return None
@@ -542,7 +544,12 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                             H = float(_df["High"].iat[j]); L = float(_df["Low"].iat[j]); R = H - L
                             if not np.isfinite(R) or R <= 0:
                                 return None
-                            return round(H,2), round(H+R,2), round(H+2*R,2), round(H+3*R,2)
+                            # بدء الأهداف من قمة الشمعة
+                            start_above = round(H, 2)
+                            t1 = round(H, 2)
+                            t2 = round(H + R, 2)
+                            t3 = round(H + 2 * R, 2)
+                            return start_above, t1, t2, t3
 
                         tp = _compute_targets(df_tf)
                         if tp is not None:
