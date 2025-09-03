@@ -1,4 +1,4 @@
-# ===اختراق اليوم الاول شرهي اول مرة و اسبوعي ايجابي
+# app.py
 import os
 import re
 from dotenv import load_dotenv
@@ -105,12 +105,14 @@ def _pbkdf2_verify(password: str, stored: str) -> bool:
         return False
 
 # ===== كاش لتحميل بيانات المستخدمين =====
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def load_users():
     df = pd.read_csv(SHEET_CSV_URL, dtype=str)
     return df.to_dict("records")
 
 def check_login(username, password, users):
+    username = (username or "").strip()
+    password = (password or "")
     for u in users:
         if u.get("username") == username:
             pwd_hash = u.get("password_hash")
@@ -157,14 +159,12 @@ def extract_symbol_df(batch_df: pd.DataFrame, code: str) -> pd.DataFrame | None:
         return None
     try:
         if isinstance(batch_df.columns, pd.MultiIndex):
-            # نستخدم المستوى الأول كرموز
             lvl0 = batch_df.columns.get_level_values(0)
             if code in set(lvl0):
                 return batch_df[code].reset_index()
             else:
                 return None
         else:
-            # حالة رمز واحد: الأعمدة تكون Open/High/Low/Close.. مباشرة
             cols = set(map(str.lower, batch_df.columns.astype(str)))
             if {"open","high","low","close"}.issubset(cols):
                 return batch_df.reset_index()
@@ -212,13 +212,35 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
     return dfx
 
 # =============================
-# منطق الإشارة (مبسّط مع تصفير مرجع البيع بعد الخروج)
+# منطق الإشارة (مع اشتراط "بيعية معتبرة")
 # =============================
+
+def _qualify_sell55(c, o, h, l, pct=0.55):
+    """
+    نعتبر الشمعة البيعية 55% "معتبرة" إذا كسرت قاع آخر شمعة شرائية 55% (الآن).
+    يمكن توسيع المنطق لاحقًا ليشمل الكسر بما بعدها.
+    """
+    rng = (h - l)
+    br = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)
+    win55  = (c > o) & (br >= pct) & (rng != 0)
+
+    # نتتبّع قاع آخر شمعة شرائية 55%
+    last_win_low = np.full(c.shape, np.nan, dtype=float)
+    cur_low = np.nan
+    for i in range(len(c)):
+        if win55[i]:
+            cur_low = l[i]
+        last_win_low[i] = cur_low
+
+    valid_sell_now = lose55 & ~np.isnan(last_win_low) & (l <= last_win_low)
+    return valid_sell_now, win55
+
 def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFrame:
     """
-    - شراء: إغلاق > قمة آخر شمعة خاسرة 55%.
+    - شراء: إغلاق > قمة آخر شمعة بيعية "معتبرة" 55%.
     - خروج: إغلاق < قاع آخر شمعة رابحة 55%.
-    - بعد الخروج: نصفر مرجع البيع لإجبار ظهور شمعة خاسرة 55% جديدة قبل أي دخول لاحق.
+    - بعد الخروج: نصفر مرجع البيع لإجبار ظهور شمعة بيعية معتبرة جديدة قبل أي دخول لاحق.
     """
     if df is None or df.empty:
         return df
@@ -227,24 +249,17 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFr
     h = df["High"].values
     l = df["Low"].values
     c = df["Close"].values
-    rng = (h - l)
 
-    # جعل النسبة مستقرة عدديًا
-    br = np.where(rng != 0, np.round(np.abs(c - o) / rng, 6), 0.0)
-    lose_cndl_55 = (c < o) & (br >= pct + 1e-9) & (rng != 0)
-    win_cndl_55  = (c > o) & (br >= pct + 1e-9) & (rng != 0)
+    valid_sell55, win55 = _qualify_sell55(c, o, h, l, pct)
 
     state = 0
     states, first_buy_signals = [], []
-    lose_high_55_const = np.nan   # قمة آخر شمعة خاسرة 55%
+    lose_high_55_const = np.nan   # قمة آخر شمعة بيعية معتبرة
     win_low_55_const   = np.nan   # قاع آخر شمعة رابحة 55%
 
     for i in range(len(df)):
-        prev_lose_high = lose_high_55_const
-        prev_win_low   = win_low_55_const
-
-        buy_sig  = (state == 0) and (not np.isnan(prev_lose_high)) and (c[i] > prev_lose_high)
-        stop_sig = (state == 1) and (not np.isnan(prev_win_low))   and (c[i] < prev_win_low)
+        buy_sig  = (state == 0) and (not np.isnan(lose_high_55_const)) and (c[i] > lose_high_55_const)
+        stop_sig = (state == 1) and (not np.isnan(win_low_55_const))   and (c[i] < win_low_55_const)
 
         if buy_sig:
             state = 1
@@ -252,62 +267,57 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float = 0.55) -> pd.DataFr
         elif stop_sig:
             state = 0
             first_buy_signals.append(False)
-            # لا نسمح بإعادة استخدام قمة قديمة بعد الخروج
-            lose_high_55_const = np.nan
+            lose_high_55_const = np.nan  # لا نسمح بإعادة استخدام قمة قديمة بعد الخروج
         else:
             first_buy_signals.append(False)
 
-        # تحديث المراجع بعد القرار
-        if lose_cndl_55[i]:
+        if valid_sell55[i]:
             lose_high_55_const = h[i]
-        if win_cndl_55[i]:
+        if win55[i]:
             win_low_55_const = l[i]
 
         states.append(state)
 
     df["State"] = states
     df["FirstBuySig"] = first_buy_signals
-    df["LoseCndl55"] = lose_cndl_55
-    df["WinCndl55"]  = win_cndl_55
+    df["LoseCndl55"] = valid_sell55
+    df["WinCndl55"]  = win55
     return df
 
 # =============================
 # إعادة التجميع الأسبوعي/الشهري من اليومي المؤكَّد
 # =============================
 
-def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
-    """يرجع (هل أُغلق أسبوع التداول الحالي؟, تاريخ نهاية هذا الأسبوع)."""
+def _week_is_closed_by_data(df_daily: pd.DataFrame, suffix: str) -> bool:
+    """تحقق عملي لإغلاق الأسبوع من توفّر آخر شمعة يومية مؤكدة قبل/بعد الإغلاق."""
+    df = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
+    if df is None or df.empty:
+        return False
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
     now = datetime.now(tz)
-    # Monday=0 .. Sunday=6 -> Thu=3 (السعودي), Fri=4 (الأمريكي)
-    end_weekday = 3 if suffix == ".SR" else 4
-    days_ahead = (end_weekday - now.weekday()) % 7
-    week_end_date = now.date() + timedelta(days=days_ahead)
-    close_h, close_m = (15, 10) if suffix == ".SR" else (16, 5)
-    closed = (now.date() > week_end_date) or (
-        now.date() == week_end_date and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m))
-    )
-    return closed, week_end_date
+    last_dt = pd.to_datetime(df["Date"].iat[-1])
+    if last_dt.date() < now.date():
+        return True
+    close_h, close_m = (15,10) if suffix==".SR" else (16,5)
+    return (last_dt.date() == now.date()) and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m))
 
 def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
     """أسبوعي من اليومي المؤكَّد + استبعاد الأسبوع الجاري إذا لم يُغلق."""
     if df_daily is None or df_daily.empty:
         return df_daily.iloc[0:0]
 
-    # فلترة اليومي من أي شمعة غير مكتملة أولاً (لا يسمح باليومي الجاري)
     df_daily = drop_last_if_incomplete(df_daily, "1d", suffix, allow_intraday_daily=False)
     if df_daily.empty:
         return df_daily.iloc[0:0]
 
     dfw = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
     dfw.set_index("Date", inplace=True)
-
     rule = "W-THU" if suffix == ".SR" else "W-FRI"
     dfw = dfw.resample(rule).agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna().reset_index()
 
-    # حذف الأسبوع الجاري إن لم يُغلق بعد
-    is_closed, current_week_end = _is_current_week_closed(suffix)
-    if not is_closed and not dfw.empty and pd.to_datetime(dfw["Date"].iat[-1]).date() == current_week_end:
+    # حذف الأسبوع الجاري إن لم يُغلق حسب البيانات
+    if not _week_is_closed_by_data(df_daily, suffix) and not dfw.empty:
+        # تاريخ نهاية الأسبوع الأخير في السلسلة
         dfw = dfw.iloc[:-1]
     return dfw
 
@@ -322,7 +332,6 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataF
 
     dfm = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
     dfm.set_index("Date", inplace=True)
-    # نهاية شهر Gregorian
     dfm = dfm.resample("M").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna().reset_index()
 
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
@@ -346,14 +355,12 @@ def monthly_state_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
     return bool(df_m["State"].iat[-1] == 1)
 
 def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str) -> bool:
-    """
-    True إذا كان آخر شمعه شهرية (المؤكدة) سجّلت أول اختراق (FirstBuySig) حسب منطق 55%.
-    """
+    """True إذا كان آخر شمعه شهرية (المؤكدة) سجّلت أول اختراق (FirstBuySig) حسب منطق 55%."""
     df_m = resample_monthly_from_daily(df_daily, suffix)
     if df_m is None or df_m.empty:
         return False
     df_m = detect_breakout_with_state(df_m)
-    return bool(df_m["FirstBuySig"].iat[-1])  # أول اختراق شهري (في هذه الدورة)
+    return bool(df_m["FirstBuySig"].iat[-1])
 
 def generate_html_table(df: pd.DataFrame) -> str:
     html = """
@@ -394,18 +401,97 @@ def generate_html_table(df: pd.DataFrame) -> str:
     return html
 
 # =============================
+# جدول الأهداف (نمط الصورة)
+# =============================
+
+TF_LABELS = {"1d": "يومي", "1wk": "أسبوعي", "1mo": "شهري"}
+
+def _last_valid_sell55_idx(df: pd.DataFrame) -> int | None:
+    """آخر شمعة بيعية معتبرة 55% (مؤشر الصف)."""
+    if df is None or df.empty or "LoseCndl55" not in df.columns:
+        return None
+    idx = np.where(df["LoseCndl55"].values)[0]
+    return int(idx[-1]) if len(idx) else None
+
+def compute_tp_targets_from_last_sell(df_tf: pd.DataFrame) -> tuple[float, float, float, float] | None:
+    """
+    يحسب: (start_above, t1, t2, t3) على فاصل محدد.
+    start_above = قمة الشمعة البيعية المعتبرة.
+    tN = start_above + N * (مدى الشمعة).
+    """
+    if df_tf is None or df_tf.empty:
+        return None
+    for col in ["Open", "High", "Low", "Close"]:
+        if col not in df_tf.columns:
+            return None
+
+    df_tf = detect_breakout_with_state(df_tf)  # يضيف LoseCndl55
+    i = _last_valid_sell55_idx(df_tf)
+    if i is None:
+        return None
+
+    H = float(df_tf["High"].iat[i])
+    L = float(df_tf["Low"].iat[i])
+    R = H - L
+    if not np.isfinite(R) or R <= 0:
+        return None
+
+    start_above = round(H, 2)
+    t1 = round(H + 1 * R, 2)
+    t2 = round(H + 2 * R, 2)
+    t3 = round(H + 3 * R, 2)
+    return start_above, t1, t2, t3
+
+def generate_targets_html_table(df: pd.DataFrame) -> str:
+    """جدول HTML مُلوَّن كما في الصورة."""
+    html = """
+    <style>
+      table {border-collapse: collapse; width: 100%; direction: rtl; font-family: Arial, sans-serif;}
+      th, td {border: 1px solid #ddd; padding: 8px; text-align: center;}
+      th {background-color: #04AA6D; color: white;}
+      tr:nth-child(even){background-color: #f9f9f9;}
+      tr:hover {background-color: #f1f1f1;}
+      .positive {background-color: #d4edda; color: #155724; font-weight: bold;}
+      .negative {background-color: #f8d7da; color: #721c24; font-weight: bold;}
+    </style>
+    <table><thead><tr>
+    """
+    for col in df.columns:
+        html += f"<th>{escape(col)}</th>"
+    html += "</tr></thead><tbody>"
+
+    for _, r in df.iterrows():
+        start_val = float(r["بداية الحركة بالإغلاق أعلى"])
+        cur_close = float(r["سعر الإغلاق"])
+        cls = "positive" if cur_close >= start_val else "negative"
+
+        html += "<tr>"
+        for col in df.columns:
+            val = r[col]
+            cell_cls = cls if col == "بداية الحركة بالإغلاق أعلى" else ""
+            html += f'<td class="{cell_cls}">{escape(str(val))}</td>'
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+# =============================
 # جلسة العمل (حالة المستخدم)
 # =============================
 st.session_state.setdefault("authenticated", False)
 st.session_state.setdefault("user", None)
 st.session_state.setdefault("login_error", None)
+st.session_state.setdefault("login_attempts", 0)
 
 def do_login():
+    if st.session_state.login_attempts >= 5:
+        st.session_state.login_error = "too_many"
+        return
     users = load_users()
     me = check_login(st.session_state.login_username, st.session_state.login_password, users)
     if me is None:
+        st.session_state.login_attempts += 1
         st.session_state.login_error = "bad"
-    elif is_expired(me["expiry"]):
+    elif is_expired(me.get("expiry","")):
         st.session_state.login_error = "expired"
     else:
         st.session_state.authenticated = True
@@ -426,6 +512,8 @@ if not st.session_state.authenticated:
             st.error("⚠️ اسم المستخدم أو كلمة المرور غير صحيحة.")
         elif st.session_state.login_error == "expired":
             st.error("⚠️ انتهى اشتراكك. يرجى التجديد.")
+        elif st.session_state.login_error == "too_many":
+            st.error("⛔ تم تجاوز محاولات الدخول المسموح بها مؤقتًا. حاول لاحقًا.")
     with col_left:
         important_links = load_important_links()
         st.markdown(
@@ -471,29 +559,43 @@ with st.sidebar:
     except Exception:
         pass
 
+    # اختراقات الساعة — اختيارية لتقليل الضغط
     st.markdown("### ⚡ أبرز اختراقات الساعة في السوق الأمريكي")
-    sample_symbols = """AAL AAPL ADBE ADI ADP ADSK AEP AKAM ALGN AMAT AMD AMGN AMZN ANSS APA AVGO AYRO BIDU BIIB BKNG BKR BMRN BNTX BYND CAR CDNS CDW CHKP CHRW CHTR CINF CLOV CMCSA CME COO COST CPB CPRT CSCO CSX CTAS CTSH DLTR DPZ DXCM EA EBAY ENPH EQIX ETSY EVRG EXC EXPE FANG FAST FFIV FITB FOX FOXA FSLR FTNT GEN GILD GOOG GOOGL GT HAS HBAN HOLX HON HSIC HST IDXX ILMN INCY INTC INTU IPGP ISRG JBHT JD JKHY KDP KHC KLAC LBTYA LBTYK LILA LILAK LIN LKQ LNT LRCX LULU MAR MAT MCHP MDLZ META MKTX MNST MSFT MU NAVI NDAQ NFLX NTAP NTES NTRS NVAX NVDA NWL NWS NWSA NXPI ODFL ORLY PARA PAYX PCAR PDCO PEP PFG POOL PYPL QCOM QQQ QRVO QVCGA REG REGN ROKU ROP ROST SBAC SBUX SIRI SNPS STX SWKS TCOM TER TMUS TRIP TRMB TROW TSCO TSLA TTD TTWO TXN UAL ULTA URBN VOD VRSK VRSN VRTX VTRS WBA WBD WDC WTW WYNN XEL XRAY XRX ZBRA ZION ZM""".split()
-    intraday_data = fetch_data(" ".join(sample_symbols), date.today() - timedelta(days=5), date.today(), "60m")
-    breakout_list = []
-    if intraday_data is not None:
-        for sym in sample_symbols:
+    show_intraday = st.checkbox("عرض اختراقات الساعة (تجريبي)", value=False, help="قد يبطئ التحميل.")
+    intraday_syms = """AAPL MSFT NVDA AMD TSLA META GOOGL AMZN NFLX AVGO QCOM TXN LRCX INTC MU ADI ORLY COST PEP PYPL QQQ""".split()
+
+    @st.cache_data(ttl=300)
+    def get_intraday_breakouts(symbols):
+        data = fetch_data(" ".join(symbols), date.today()-timedelta(days=5), date.today(), "60m")
+        out = []
+        if data is None or (isinstance(data, pd.DataFrame) and data.empty):
+            return out
+        for s in symbols:
             try:
-                df_sym = extract_symbol_df(intraday_data, sym)
-                if df_sym is None:
+                df = extract_symbol_df(data, s)
+                if df is None or df.empty:
                     continue
-                df_sym = detect_breakout_with_state(df_sym)
-                if not df_sym.empty and df_sym["FirstBuySig"].iat[-1]:
-                    breakout_list.append(sym)
+                df = detect_breakout_with_state(df)
+                if not df.empty and bool(df["FirstBuySig"].iat[-1]):
+                    out.append(s)
             except Exception:
                 continue
-    st.sidebar.markdown(
-        ", ".join([f"[{s}](https://www.tradingview.com/symbols/{s}/)" for s in breakout_list]) if breakout_list else "لا توجد اختراقات ساعة حالياً."
-    )
+        return out
+
+    if show_intraday:
+        breakout_list = get_intraday_breakouts(intraday_syms)
+        st.sidebar.markdown(
+            ", ".join([f"[{s}](https://www.tradingview.com/symbols/{s}/)" for s in breakout_list]) if breakout_list else "لا توجد اختراقات ساعة حالياً."
+        )
+    else:
+        st.sidebar.caption("فعّل الخيار أعلاه لعرضها.")
 
     st.markdown("### ⚙️ إعدادات التحليل")
     market = st.sidebar.selectbox("اختر السوق", ["السوق السعودي", "السوق الأمريكي"])
     suffix = ".SR" if market == "السوق السعودي" else ""
-    interval = st.sidebar.selectbox("الفاصل الزمني (للعرض فقط)", ["1d", "1wk", "1mo"])
+    # هذا الفاصل يُستخدم لحساب جدول الأهداف مثل الصورة
+    interval = st.sidebar.selectbox("الفاصل لحساب الأهداف", ["1d", "1wk", "1mo"], index=0,
+                                    help="هذا الفاصل لا يؤثر على فلترة الاختراق الثلاثي، بل على جدول الأهداف فقط.")
     start_date = st.sidebar.date_input("من", date(2020, 1, 1))
     end_date = st.sidebar.date_input("إلى", date.today())
 
@@ -535,8 +637,6 @@ with st.sidebar:
 symbols_input = st.text_area("أدخل الرموز (مفصولة بمسافة أو سطر)", st.session_state.get("symbols", ""))
 symbols = [s.strip() + suffix for s in symbols_input.replace("\n", " ").split() if s.strip()]
 
-# (ألغينا أي حد أقصى للرموز — سيتم تحليل الكل عبر دفعات)
-
 # =============================
 # تنفيذ التحليل
 # =============================
@@ -547,6 +647,7 @@ if st.button("🔎 تنفيذ التحليل"):
 
     with st.spinner("⏳ نجلب البيانات ونحسب شروط الفلتر لكل الرموز..."):
         results = []
+        targets_rows = []
 
         total = len(symbols)
         prog = st.progress(0, text=f"بدء التحليل... (0/{total})")
@@ -557,7 +658,6 @@ if st.button("🔎 تنفيذ التحليل"):
             chunk_syms = symbols[i:i + batch_size]
             ddata_chunk = fetch_data(" ".join(chunk_syms), start_date, end_date, "1d")
             if ddata_chunk is None or (isinstance(ddata_chunk, pd.DataFrame) and ddata_chunk.empty):
-                # تحديث التقدّم حتى لو فشل الدفعة
                 processed += len(chunk_syms)
                 prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
                 continue
@@ -584,7 +684,7 @@ if st.button("🔎 تنفيذ التحليل"):
                     if df_d is None or df_d.empty:
                         continue
 
-                    # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية 55% (إغلاق يومي)
+                    # (1) شرط اليومي: أول إشارة اختراق فوق قمة آخر شمعة بيعية معتبرة 55% (إغلاق يومي)
                     daily_first_breakout = bool(df_d["FirstBuySig"].iat[-1])
                     if not daily_first_breakout:
                         continue
@@ -595,8 +695,8 @@ if st.button("🔎 تنفيذ التحليل"):
                         continue
 
                     # (3) شرط الشهري: "أول اختراق فقط"
-                    monthly_first_breakout = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                    if not monthly_first_breakout:
+                    monthly_first = monthly_first_breakout_from_daily(df_d_conf, suffix)
+                    if not monthly_first:
                         continue
 
                     # لو وصلنا هنا فالرمز يحقّق الشروط الثلاثة
@@ -604,7 +704,7 @@ if st.button("🔎 تنفيذ التحليل"):
                     last_close = float(df_d["Close"].iat[-1])
 
                     sym = code.replace(suffix, '').upper()
-                    company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:15]
+                    company_name = (symbol_name_dict.get(sym, "غير معروف") or "غير معروف")[:20]
                     tv = f"TADAWUL-{sym}" if suffix == ".SR" else sym.upper()
                     url = f"https://www.tradingview.com/symbols/{tv}/"
 
@@ -616,10 +716,32 @@ if st.button("🔎 تنفيذ التحليل"):
                             "سعر الإغلاق": round(last_close, 2),
                             "يومي": "إيجابي" if daily_positive else "سلبي",
                             "أسبوعي": "إيجابي" if weekly_positive else "سلبي",
-                            "شهري": "اختراق أول مرة" if monthly_first_breakout else "—",
+                            "شهري": "اختراق أول مرة" if monthly_first else "—",
                             "رابط TradingView": url,
                         }
                     )
+
+                    # ===== جدول الأهداف (حسب الفاصل المختار في الواجهة) =====
+                    if interval == "1d":
+                        df_tf = df_d_conf.copy()
+                    elif interval == "1wk":
+                        df_tf = resample_weekly_from_daily(df_d_conf, suffix)
+                    else:
+                        df_tf = resample_monthly_from_daily(df_d_conf, suffix)
+
+                    tp = compute_tp_targets_from_last_sell(df_tf)
+                    if tp is not None:
+                        start_above, t1, t2, t3 = tp
+                        targets_rows.append({
+                            "اسم الشركة": company_name,
+                            "الرمز": sym,
+                            "سعر الإغلاق": round(last_close, 2),
+                            "الفاصل": TF_LABELS.get(interval, interval),
+                            "بداية الحركة بالإغلاق أعلى": start_above,
+                            "الهدف الأول": t1,
+                            "الهدف الثاني": t2,
+                            "الهدف الثالث": t3,
+                        })
 
                 except Exception:
                     continue
@@ -627,11 +749,13 @@ if st.button("🔎 تنفيذ التحليل"):
             processed += len(chunk_syms)
             prog.progress(min(processed / total, 1.0), text=f"تمت معالجة {processed}/{total}")
 
+        # ===== عرض النتائج =====
         if results:
             df_results = pd.DataFrame(results)[
                 ["م", "الرمز", "اسم الشركة", "سعر الإغلاق", "يومي", "أسبوعي", "شهري", "رابط TradingView"]
             ]
-            # ترقيم تسلسلي
+            # فرز وترقيم
+            df_results = df_results.sort_values(by="الرمز").reset_index(drop=True)
             df_results["م"] = range(1, len(df_results) + 1)
             # تنسيق السعر
             df_results["سعر الإغلاق"] = df_results["سعر الإغلاق"].map(lambda x: f"{x:,.2f}")
@@ -643,7 +767,7 @@ if st.button("🔎 تنفيذ التحليل"):
             tf_label = tf_label_map.get(interval, str(interval))
 
             with st.container():
-                st.subheader(f"أبرز اختراقات ({market_name}) - فاصل {tf_label} ليوم {day_str}")
+                st.subheader(f"اختراق (TD) — {market_name} — {tf_label} — {day_str} — العدد: {len(df_results)}")
                 html_out = generate_html_table(df_results)
                 st.markdown(html_out, unsafe_allow_html=True)
 
@@ -663,3 +787,26 @@ if st.button("🔎 تنفيذ التحليل"):
                 )
         else:
             st.info("🔎 لا توجد رموز تحقق الشروط (اختراق يومي مؤكد + أسبوعي إيجابي + أول اختراق شهري).")
+
+        # ===== جدول الأهداف بنمط الصورة =====
+        if targets_rows:
+            df_targets = pd.DataFrame(targets_rows)[
+                ["اسم الشركة","الرمز","سعر الإغلاق","الفاصل","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]
+            ]
+            # تنسيق الأرقام
+            for col in ["سعر الإغلاق","بداية الحركة بالإغلاق أعلى","الهدف الأول","الهدف الثاني","الهدف الثالث"]:
+                df_targets[col] = df_targets[col].map(lambda x: f"{float(x):.2f}")
+
+            st.markdown("### 🎯 جدول الأهداف (TriplePower) — نمط الصورة")
+            html_targets = generate_targets_html_table(df_targets)
+            st.markdown(html_targets, unsafe_allow_html=True)
+
+            # تنزيل
+            st.download_button(
+                "📥 تنزيل جدول الأهداف CSV",
+                df_targets.to_csv(index=False).encode("utf-8-sig"),
+                file_name="TriplePower_Targets.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("لا توجد بيانات كافية لحساب الأهداف على الفاصل المختار.")
