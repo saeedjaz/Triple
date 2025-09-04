@@ -457,17 +457,34 @@ def render_table(df: pd.DataFrame)->str:
     for col in df.columns: html.append(f"<th>{esc(str(col))}</th>")
     html.append("</tr></thead><tbody>")
     for _, r in df.iterrows():
-        try: close_val=float(str(r["سعر الإغلاق"]).replace(",",""))
-        except Exception: close_val=None
+        # سعر الإغلاق المعتمد للمقارنة
+        try:
+            close_val=float(str(r["سعر الإغلاق"]).replace(",",""))
+        except Exception:
+            close_val=None
+        # قيمة الدعم الأسبوعي (قد تكون "—") لاستخدامها في التلوين الشرطي
+        support_val=None
+        try:
+            sv=str(r.get("الدعم الاسبوعي","—")).strip()
+            if sv not in ("—","",None):
+                support_val=float(sv.replace(",",""))
+        except Exception:
+            support_val=None
+
         html.append("<tr>")
         for col in df.columns:
             val=r[col]; cls=""
+            # تلوين قمة الشمعة البيعية (يومي/أسبوعي) وفق المقارنة مع الإغلاق
             if close_val is not None and col in {"قمة الشمعة البيعية الاسبوعية","قمة الشمعة البيعية اليومية"}:
                 try:
                     top=float(str(val).replace(",",""))
                     cls="positive" if close_val>=top else "negative"
                 except Exception:
                     cls=""
+            # 🆕 تلوين الدعم الأسبوعي بالأحمر عند الكسر (إغلاق أدنى من الدعم)
+            if col == "الدعم الاسبوعي" and close_val is not None and support_val is not None:
+                if close_val < support_val:
+                    cls = "negative"
             html.append(f'<td class="{cls}">{esc(str(val))}</td>')
         html.append("</tr>")
     html.append("</tbody></table>")
