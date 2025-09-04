@@ -372,6 +372,14 @@ def _fmt_num(x):
     try: return f"{float(x):.2f}"
     except Exception: return "—"
 
+# تقريب إلى أقرب تيك (0.01/0.05/0.1 ...)
+def round_to_tick(x, tick=0.01):
+    try:
+        fx = float(x)
+        return round(round(fx / tick) * tick, 2)
+    except Exception:
+        return x
+
 
 def render_table(df: pd.DataFrame)->str:
     from html import escape as esc
@@ -470,6 +478,10 @@ with st.sidebar:
                                      help="إذا فُعل، يعرض آخر سعر يومي متاح؛ وإلا يعرض إغلاق آخر أسبوع مغلق.")
     batch_size=st.slider("حجم الدُفعة عند الجلب", 20, 120, 60, 10, key="batch_size_slider")
 
+    # تقريب الأهداف حسب التيك (اختياري)
+    enable_tick_round = st.checkbox("تقريب الأهداف حسب تيك السعر", value=False, key="tick_round_enable")
+    tick_value = st.selectbox("قيمة التيك", [0.01, 0.05, 0.1], index=0, key="tick_value") if enable_tick_round else None
+
     symbol_name_dict = load_symbols_names("saudiSY.txt","سعودي") if suffix==".SR" else load_symbols_names("usaSY.txt","امريكي")
 
     if st.button("🎯 رموز تجريبية", key="demo_symbols_btn"):
@@ -545,9 +557,18 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     t_d = last_sell_anchor_targets(df_d_conf, pct=0.55)
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
+                    # تقريب حسب التيك (اختياري)
+                    if tick_value:
+                        if isinstance(weekly_t1, (int, float)): weekly_t1 = round_to_tick(weekly_t1, tick_value)
+                        if isinstance(weekly_t2, (int, float)): weekly_t2 = round_to_tick(weekly_t2, tick_value)
+                        if isinstance(weekly_t3, (int, float)): weekly_t3 = round_to_tick(weekly_t3, tick_value)
+                        if isinstance(daily_t1,  (int, float)): daily_t1  = round_to_tick(daily_t1,  tick_value)
+                        if isinstance(daily_t2,  (int, float)): daily_t2  = round_to_tick(daily_t2,  tick_value)
+                        if isinstance(daily_t3,  (int, float)): daily_t3  = round_to_tick(daily_t3,  tick_value)
+
                     # شهري: القوة والتسارع الشهري وفق المدرسة
                     df_m = resample_monthly_from_daily(df_d_conf, suffix)
-                    monthly_text = "—"
+                    monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
                     info_m = last_sell_anchor_info(df_m, pct=0.55) if (df_m is not None and not df_m.empty) else None
                     if info_m is not None:
                         Hm = float(info_m["H"]); Lm = float(info_m["L"]) 
@@ -623,9 +644,9 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
 
             st.markdown(render_table(df_final), unsafe_allow_html=True)
             st.download_button(
-                "📥 تنزيل جدول الأهداف (الأسبوعي) CSV",
+                "📥 تنزيل جدول الأهداف (اليومي + الأسبوعي) CSV",
                 df_final.to_csv(index=False).encode("utf-8-sig"),
-                file_name="TriplePower_Targets_Weekly.csv",
+                file_name="TriplePower_Targets_DailyWeekly.csv",
                 mime="text/csv"
             )
         else:
