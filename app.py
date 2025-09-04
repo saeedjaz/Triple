@@ -1,10 +1,11 @@
-# app.py
+# app.py — جدول اليومي فقط
 # =========================================================
-# TriplePower — جدول الأهداف (سطر واحد لكل رمز)
+# TriplePower — جدول الأهداف (اليومي فقط — سطر واحد لكل رمز)
 # يعتمد اختيار "الشمعة البيعية المعتبرة" على كسر الشمعة الشرائية
-# (بنفسها أو لاحقًا) وفق شرط 55% — يومي/أسبوعي.
-# ويضيف القوة والتسارع الشهري + F:M.
-# مع إصلاح احتساب الأسبوع المغلق فعليًا.
+# (بنفسها أو لاحقًا) وفق شرط 55% — يومي.
+# يترك فلتر الاختراق الثلاثي كما هو (يومي + أسبوعي + شهري) لانتقاء الرموز،
+# لكن الجدول النهائي يعرض اليومي فقط.
+# مع تفعيل خيار عرض اليومي قبل الإغلاق فعليًا.
 # =========================================================
 
 import os, re, hashlib, secrets, base64
@@ -28,7 +29,7 @@ if not SHEET_CSV_URL:
 # =============================
 # تهيئة الصفحة + RTL
 # =============================
-st.set_page_config(page_title="🎯 جدول الأهداف | TriplePower", layout="wide")
+st.set_page_config(page_title="🎯 جدول الأهداف (اليومي فقط) | TriplePower", layout="wide")
 st.markdown("""
 <style>
   :root, html, body, .stApp { direction: rtl; }
@@ -82,6 +83,7 @@ def load_symbols_names(file_path: str, market_type: str) -> dict:
 
 # ===== مصادقة (PBKDF2) =====
 PBKDF_ITER = 100_000
+
 def _pbkdf2_verify(password: str, stored: str) -> bool:
     try:
         algo, algoname, iters, b64salt, b64hash = stored.split("$",4)
@@ -169,9 +171,11 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
 # =============================
 # منطق 55% (بيعية/شرائية) مع "الكسر الآن أو لاحقًا"
 # =============================
+
 def _body_ratio(c,o,h,l):
     rng=(h-l)
     return np.where(rng!=0, np.abs(c-o)/rng, 0.0), rng
+
 
 def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     """
@@ -215,6 +219,7 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
         return None
     return {"idx": j, "H": round(H,2), "L": round(L,2), "R": round(R,2)}
 
+
 def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     """
     تُرجع (H, T1, T2, T3) بحسب آخر شمعة بيعية 55% المعتبرة (الآن أو لاحقًا).
@@ -228,6 +233,7 @@ def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
 # التجميع الأسبوعي/الشهري من اليومي المؤكد
 # مع تحديد الأسبوع المغلق فعليًا
 # =============================
+
 def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
     """
     يرجع (هل أُغلق أسبوع التداول الحالي؟, تاريخ نهاية هذا الأسبوع).
@@ -244,6 +250,7 @@ def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
         (now.date() == week_end_date and (now.hour > close_h or (now.hour == close_h and now.minute >= close_m)))
     )
     return closed, week_end_date
+
 
 def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFrame:
     """إنشاء شموع أسبوعية من اليومي المؤكد، واستبعاد أسبوع التداول الجاري إن لم يُغلق."""
@@ -275,6 +282,7 @@ def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFr
 
     return dfw
 
+
 def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFrame:
     if df_daily is None or df_daily.empty: return df_daily.iloc[0:0]
     df_daily=drop_last_if_incomplete(df_daily,"1d",suffix,False)
@@ -289,8 +297,9 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFra
     return dfm
 
 # =============================
-# فلتر اختياري (كما كان)
+# فلتر اختياري
 # =============================
+
 def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
     if df is None or df.empty: return df
     o=df["Open"].values; h=df["High"].values; l=df["Low"].values; c=df["Close"].values
@@ -319,11 +328,13 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
     df["LoseCndl55"]=valid_sell_now; df["WinCndl55"]=win55
     return df
 
+
 def weekly_state_from_daily(df_daily: pd.DataFrame, suffix: str)->bool:
     dfw=resample_weekly_from_daily(df_daily,suffix)
     if dfw.empty: return False
     dfw=detect_breakout_with_state(dfw)
     return bool(dfw["State"].iat[-1]==1)
+
 
 def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str)->bool:
     dfm=resample_monthly_from_daily(df_daily,suffix)
@@ -332,11 +343,13 @@ def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str)->bool
     return bool(dfm["FirstBuySig"].iat[-1])
 
 # =============================
-# HTML للجدول النهائي
+# HTML للجدول النهائي (اليومي فقط)
 # =============================
+
 def _fmt_num(x):
     try: return f"{float(x):.2f}"
     except Exception: return "—"
+
 
 def render_table(df: pd.DataFrame)->str:
     from html import escape as esc
@@ -349,7 +362,7 @@ def render_table(df: pd.DataFrame)->str:
         html.append("<tr>")
         for col in df.columns:
             val=r[col]; cls=""
-            if close_val is not None and col in {"قمة الشمعة البيعية اليومية","قمة الشمعة البيعية الأسبوعية"}:
+            if close_val is not None and col in {"قمة الشمعة البيعية اليومية"}:
                 try:
                     top=float(str(val).replace(",",""))
                     cls="positive" if close_val>=top else "negative"
@@ -363,6 +376,7 @@ def render_table(df: pd.DataFrame)->str:
 # =============================
 # جلسة العمل (تسجيل الدخول)
 # =============================
+
 st.session_state.setdefault("authenticated", False)
 st.session_state.setdefault("user", None)
 st.session_state.setdefault("login_error", None)
@@ -422,7 +436,7 @@ with st.sidebar:
         if 0<=days_left<=3: st.warning(f"⚠️ تبقّى {days_left} يومًا على انتهاء الاشتراك.")
     except Exception: pass
 
-    market=st.selectbox("اختر السوق", ["السوق السعودي","السوق الأمريكي"])
+    market=st.selectbox("اختر السوق", ["السوق السعودي","السوق الأمريكي"]) 
     suffix=".SR" if market=="السوق السعودي" else ""
     apply_triple_filter=st.checkbox(
         "اشتراط الاختراق الثلاثي (اختياري)", value=False,
@@ -453,9 +467,9 @@ symbols_input=st.text_area("أدخل الرموز (مفصولة بمسافة أ�
 symbols=[s.strip()+suffix for s in symbols_input.replace("\n"," ").split() if s.strip()]
 
 # =============================
-# تنفيذ التحليل — بناء الجدول بالشكل المطلوب
+# تنفيذ التحليل — بناء الجدول اليومي فقط
 # =============================
-if st.button("🔎 إنشاء جدول الأهداف"):
+if st.button("🔎 إنشاء جدول الأهداف (اليومي فقط)"):
     if not symbols:
         st.warning("⚠️ الرجاء إدخال رموز أولًا."); st.stop()
 
@@ -473,19 +487,23 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                 try:
                     df_d_raw=extract_symbol_df(ddata_chunk, code)
                     if df_d_raw is None or df_d_raw.empty: continue
-                    df_d_conf=drop_last_if_incomplete(df_d_raw,"1d",suffix,allow_intraday_daily=False)
+
+                    # ✅ تفعيل خيار عرض اليومي قبل الإغلاق فعليًا
+                    df_d_conf = drop_last_if_incomplete(df_d_raw, "1d", suffix, allow_intraday_daily=allow_intraday_daily)
+
                     if df_d_conf is None or df_d_conf.empty: continue
 
-                    # فلتر اختياري (كما هو)
-                    df_d=detect_breakout_with_state(df_d_conf)
-                    daily_first=bool(df_d["FirstBuySig"].iat[-1]) if not df_d.empty else False
+                    # فلتر الاختراق الثلاثي (اختياري): يومي مؤكَّد + أسبوعي إيجابي + أول شهري
+                    df_d = detect_breakout_with_state(df_d_conf)
+                    daily_state_pos = bool((not df_d.empty) and (df_d["State"].iat[-1] == 1))
                     weekly_pos = weekly_state_from_daily(df_d_conf, suffix)
                     monthly_first = monthly_first_breakout_from_daily(df_d_conf, suffix)
-                    if apply_triple_filter and not (daily_first and weekly_pos and monthly_first):
+                    if apply_triple_filter and not (daily_state_pos and weekly_pos and monthly_first):
                         continue
 
                     # بيانات عامة
-                    last_close=float(df_d_conf["Close"].iat[-1])
+                    # السعر المعروض: الإغلاق المؤكَّد أو آخر سعر متاح إذا فُعّل العرض قبل الإغلاق
+                    last_close = float((df_d_raw if allow_intraday_daily else df_d_conf)["Close"].iat[-1])
                     sym=code.replace(suffix,"").upper()
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
@@ -494,40 +512,14 @@ if st.button("🔎 إنشاء جدول الأهداف"):
                     t = last_sell_anchor_targets(df_d_conf, pct=0.55)
                     if t is not None: daily_H, daily_t1, daily_t2, daily_t3 = t
 
-                    # أسبوعي: تجميع صحيح للأسابيع المغلقة فقط ثم حساب المرساة
-                    df_w = resample_weekly_from_daily(df_d_conf, suffix)
-                    weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
-                    t = last_sell_anchor_targets(df_w, pct=0.55)
-                    if t is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t
-
-                    # شهري: لإنتاج نص القوة + F:M اعتمادًا على آخر شمعة بيعية شهرية معتبرة
-                    df_m = resample_monthly_from_daily(df_d_conf, suffix)
-                    monthly_text="لا توجد شمعة بيعية شهرية معتبرة"; fm_value="—"
-                    info_m = last_sell_anchor_info(df_m, pct=0.55) if df_m is not None and not df_m.empty else None
-                    if info_m is not None:
-                        Hm, Lm = info_m["H"], info_m["L"]
-                        if last_close < Hm:
-                            monthly_text=f"غير متواجدة ويجب الإغلاق فوق {Hm:.2f}"; fm_value=f"{Hm:.2f}"
-                        else:
-                            monthly_text=f"متواجدة بشرط الحفاظ على {Lm:.2f}"; fm_value=f"{Lm:.2f}"
-
                     rows.append({
                         "اسم الشركة": company,
                         "الرمز": sym,
                         "سعر الإغلاق": round(last_close,2),
-
                         "قمة الشمعة البيعية اليومية": daily_H,
                         "الهدف الأول (يومي)": daily_t1,
                         "الهدف الثاني (يومي)": daily_t2,
                         "الهدف الثالث (يومي)": daily_t3,
-
-                        "قمة الشمعة البيعية الأسبوعية": weekly_H,
-                        "الهدف الأول (أسبوعي)": weekly_t1,
-                        "الهدف الثاني (أسبوعي)": weekly_t2,
-                        "الهدف الثالث (أسبوعي)": weekly_t3,
-
-                        "القوة والتسارع الشهري": monthly_text,
-                        "F:M": fm_value,
                     })
 
                 except Exception:
@@ -536,31 +528,31 @@ if st.button("🔎 إنشاء جدول الأهداف"):
             processed+=len(chunk_syms)
             prog.progress(min(processed/total,1.0), text=f"تمت معالجة {processed}/{total}")
 
-        # ===== إخراج الجدول =====
+        # ===== إخراج الجدول (اليومي فقط) =====
         if rows:
             df_final=pd.DataFrame(rows)[[
                 "اسم الشركة","الرمز","سعر الإغلاق",
                 "قمة الشمعة البيعية اليومية","الهدف الأول (يومي)","الهدف الثاني (يومي)","الهدف الثالث (يومي)",
-                "قمة الشمعة البيعية الأسبوعية","الهدف الأول (أسبوعي)","الهدف الثاني (أسبوعي)","الهدف الثالث (أسبوعي)",
-                "القوة والتسارع الشهري","F:M"
             ]]
 
             # تنسيق أرقام للعرض
             for col in df_final.columns:
-                if col in {"اسم الشركة","الرمز","القوة والتسارع الشهري"}: continue
+                if col in {"اسم الشركة","الرمز"}: continue
                 df_final[col]=df_final[col].apply(lambda x: _fmt_num(x))
 
             market_name="السوق السعودي" if suffix==".SR" else "السوق الأمريكي"
             day_str=f"{end_date.day}-{end_date.month}-{end_date.year}"
             filt_note="— فلترة بالاختراق مفعّلة" if apply_triple_filter else "— بدون اشتراط الاختراق"
-            st.subheader(f"🎯 جدول الأهداف ({market_name}) — {day_str} — عدد الرموز: {len(df_final)} {filt_note}")
+            if allow_intraday_daily:
+                filt_note += " — عرض اليومي قبل الإغلاق"
+            st.subheader(f"🎯 جدول الأهداف (اليومي فقط) — {market_name} — {day_str} — عدد الرموز: {len(df_final)} {filt_note}")
 
             st.markdown(render_table(df_final), unsafe_allow_html=True)
             st.download_button(
-                "📥 تنزيل جدول الأهداف CSV",
+                "📥 تنزيل جدول الأهداف (اليومي) CSV",
                 df_final.to_csv(index=False).encode("utf-8-sig"),
-                file_name="TriplePower_Targets.csv",
+                file_name="TriplePower_Targets_Daily.csv",
                 mime="text/csv"
             )
         else:
-            st.info("لا توجد بيانات كافية لحساب الأهداف على الفواصل المحددة.")
+            st.info("لا توجد بيانات كافية لحساب الأهداف اليومية على الفاصل المحدد.")
