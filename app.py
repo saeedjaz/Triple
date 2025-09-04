@@ -554,7 +554,19 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         if last_close < Hm:
                             monthly_text = f"غير متواجدة ويجب الإغلاق فوق {Hm:.2f}"
                         else:
-                            monthly_text = f"متواجدة بشرط الحفاظ على {Lm:.2f}"
+                            # احسب قاع آخر شمعة شرائية شهرية 55%
+                            dfm_calc = df_m[["Open","High","Low","Close"]].dropna().copy()
+                            oM = dfm_calc["Open"].to_numpy(); hM = dfm_calc["High"].to_numpy()
+                            lM = dfm_calc["Low"].to_numpy();  cM = dfm_calc["Close"].to_numpy()
+                            rngM = (hM - lM)
+                            brM  = np.where(rngM != 0, np.abs(cM - oM) / rngM, 0.0)
+                            win55M = (cM > oM) & (brM >= 0.55) & (rngM != 0)
+                            last_win_idx = np.where(win55M)[0]
+                            last_win_low_val = None
+                            if len(last_win_idx) > 0:
+                                last_win_low_val = float(lM[last_win_idx[-1]])
+                            monthly_low_guard = last_win_low_val if last_win_low_val is not None else Lm
+                            monthly_text = f"متواجدة بشرط الحفاظ على {monthly_low_guard:.2f}"
 
                     rows.append({
                         "اسم الشركة": company,
