@@ -1,24 +1,10 @@
 # app.py — جدول الأهداف (اليومي + الأسبوعي)
 # =========================================================
 # TriplePower — جدول الأهداف (سطر واحد لكل رمز)
-# ✅ خطوة 1: اعتماد كسر الشمعة الشرائية بالإغلاق (Close) لا بالـ Low
-# ✅ خطوة 2: صياغة الحالة السلبية الشهرية (إغلاق شهري دون قاع آخر شرائية 55%)
-# ✅ خطوة 3: مطابقة TradingView — اختيار المرساة الحالية: أحدث "مقاومة غير مخترقة"
-#    (أحدث شمعة بيعية 55% معتبرة لم يحدث فوقها إغلاق بعد). إن لم توجد، نستخدم
-#    آخر مرساة كان اختراقها هو الأحدث (السلوك السابق).
-# 
-# الأعمدة المعروضة:
-#   • اليومي: قمة الشمعة البيعية اليومية + 3 أهداف
-#   • الأسبوعي: قمة الشمعة البيعية الأسبوعية (المقاومة الحالية) + 3 أهداف
-#   • القوة والتسارع الشهري: نص بحسب المقارنة مع آخر شمعة بيعية شهرية معتبرة
-# 
-# حساب الأهداف وفق مدرسة القوة الثلاثية:
-#   R = H - L ، ثم T1 = H + 1*R ، T2 = H + 2*R ، T3 = H + 3*R
-# 
-# ملاحظات تنفيذية:
-#   • الجلب من Yahoo غير معدّل (auto_adjust=False) لضمان تطابق H/L مع TradingView.
-#   • يتم استبعاد الأسبوع/الشهر الجاري غير المغلق من التجميع.
-#   • خيار تقريب الأهداف حسب قيمة التيك (اختياري).
+# ✅ كسر الشرائية بالإغلاق (Close)
+# ✅ سلبية شهرية صريحة عند كسر قاع الشرائية الشهرية 55%
+# ✅ المرساة الحالية = أحدث "مقاومة غير مخترقة"
+# 🆕 عمود أخير: "الدعم الاسبوعي" = قاع آخر شمعة شرائية 55% أسبوعية مغلقة
 # =========================================================
 
 import os, re, hashlib, secrets, base64
@@ -186,8 +172,7 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
     return dfx
 
 # =============================
-# منطق 55% (بيعية/شرائية) + مراسي الاختراق
-# خطوة 1: اعتماد الكسر بالإغلاق (Close) لا بالـ Low
+# منطق 55% (بيعية/شرائية) + مراسي الاختراق (Close)
 # =============================
 
 def _body_ratio(c,o,h,l):
@@ -196,11 +181,6 @@ def _body_ratio(c,o,h,l):
 
 
 def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
-    """
-    تُرجع dict تحتوي idx/H/L/R لآخر شمعة بيعية 55% كسرت قاع شمعة شرائية 55%
-    (بنفسها بالإغلاق أو لاحقًا بالإغلاق) — وفق مدرسة TriplePower.
-    لا يتم تقريب H/L هنا للحفاظ على الدقة؛ التقريب يكون عند الإخراج فقط.
-    """
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
@@ -212,7 +192,6 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     lose55 = (c < o) & (br >= pct) & (rng != 0)
     win55  = (c > o) & (br >= pct) & (rng != 0)
 
-    # آخر قاع شرائي 55% قبل كل نقطة
     last_win_low = np.full(c.shape, np.nan)
     cur = np.nan
     for i in range(len(c)):
@@ -220,7 +199,6 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
             cur = l[i]
         last_win_low[i] = cur
 
-    # أصغر إغلاق مستقبلي (لتحقيق "الكسر لاحقًا" بالإغلاق)
     future_min_close = np.minimum.accumulate(c[::-1])[::-1]
 
     considered_sell = (
@@ -253,11 +231,7 @@ def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         round(H + 3.0*R, 2)
     )
 
-# ---------------------------------------------
-# خطوة 3: مطابقة TradingView — المرساة الحالية
-# 1) نعدّ كل المراسي البيعية المعتبرة 55% ونحسب تاريخ اختراقها بالإغلاق (إن حدث)
-# 2) نختار أحدث مرساة غير مخترقة؛ وإلا آخر مكسورة.
-# ---------------------------------------------
+# -------- مطابقة TradingView: المرساة الحالية --------
 
 def _enumerate_sell_anchors_with_break(df: pd.DataFrame, pct: float=0.55):
     if df is None or df.empty:
@@ -398,7 +372,7 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFra
     return dfm
 
 # =============================
-# فلتر اختياري (اختراقات)
+# فلتر اختياري (اختراقات) + دعم أسبوعي 55%
 # =============================
 
 def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
@@ -412,7 +386,6 @@ def detect_breakout_with_state(df: pd.DataFrame, pct: float=0.55)->pd.DataFrame:
     for i in range(len(c)):
         if win55[i]: cur=l[i]
         last_win_low[i]=cur
-    # معيار اعتبار البيعية الآن: إغلاق تحت قاع الشرائية 55%
     valid_sell_now = lose55 & ~np.isnan(last_win_low) & (c <= last_win_low)
 
     state=0; states=[]; first_buy=[]; lose_high=np.nan; win_low=np.nan
@@ -444,6 +417,22 @@ def monthly_first_breakout_from_daily(df_daily: pd.DataFrame, suffix: str)->bool
     if dfm is None or dfm.empty: return False
     dfm=detect_breakout_with_state(dfm)
     return bool(dfm["FirstBuySig"].iat[-1])
+
+# ——— الدعم الأسبوعي: قاع آخر شمعة شرائية 55% أسبوعية مغلقة ———
+
+def weekly_last_bullish55_low_value(df_w: pd.DataFrame, pct: float=0.55):
+    if df_w is None or df_w.empty:
+        return None
+    df = df_w[["Open","High","Low","Close"]].dropna().copy()
+    o = df["Open"].to_numpy(); h = df["High"].to_numpy()
+    l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    win55 = (c > o) & (br >= pct) & (rng != 0)
+    idx = np.where(win55)[0]
+    if len(idx)==0:
+        return None
+    return float(l[int(idx[-1])])
 
 # =============================
 # تنسيق العرض + تقريب التيك
@@ -539,7 +528,6 @@ with st.sidebar:
                      font-weight:bold;text-align:center;margin-bottom:10px;\">
                      ✅ اشتراكك سارٍ حتى: {me['expiry']}</div>""", unsafe_allow_html=True)
 
-    # تنبيه قرب الانتهاء
     try:
         expiry_dt=datetime.strptime(me["expiry"].strip(),"%Y-%m-%d").date()
         today_riyadh=datetime.now(ZoneInfo("Asia/Riyadh")).date()
@@ -559,7 +547,6 @@ with st.sidebar:
                                      help="إذا فُعل، يعرض آخر سعر يومي متاح؛ وإلا يعرض إغلاق آخر أسبوع مغلق.")
     batch_size=st.slider("حجم الدُفعة عند الجلب", 20, 120, 60, 10, key="batch_size_slider")
 
-    # تقريب الأهداف حسب التيك (اختياري)
     enable_tick_round = st.checkbox("تقريب الأهداف حسب تيك السعر", value=False, key="tick_round_enable")
     tick_value = st.selectbox("قيمة التيك", [0.01, 0.05, 0.1], index=0, key="tick_value") if enable_tick_round else None
 
@@ -604,19 +591,15 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     df_d_raw=extract_symbol_df(ddata_chunk, code)
                     if df_d_raw is None or df_d_raw.empty: continue
 
-                    # يومي مؤكد لاحتساب الأسابيع/الشهور المغلقة
                     df_d_conf = drop_last_if_incomplete(df_d_raw, "1d", suffix, allow_intraday_daily=False)
                     if df_d_conf is None or df_d_conf.empty: continue
 
-                    # تجميع أسبوعي صحيح (الأسبوع غير المغلق يُستبعد)
                     df_w = resample_weekly_from_daily(df_d_conf, suffix)
                     if df_w is None or df_w.empty: continue
 
-                    # السعر المعروض: إغلاق الأسبوع الأخير المغلق أو آخر سعر يومي متاح إذا فُعل الخيار
                     weekly_close = float(df_w["Close"].iat[-1])
                     last_close = float(df_d_raw["Close"].iat[-1]) if allow_intraday_daily else weekly_close
 
-                    # فلتر اختياري: يومي مؤكَّد + أسبوعي إيجابي + أول شهري
                     df_d = detect_breakout_with_state(df_d_conf)
                     daily_state_pos = bool((not df_d.empty) and (df_d["State"].iat[-1] == 1))
                     weekly_pos = weekly_state_from_daily(df_d_conf, suffix)
@@ -624,21 +607,23 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     if apply_triple_filter and not (daily_state_pos and weekly_pos and monthly_first):
                         continue
 
-                    # أسماء
                     sym=code.replace(suffix,"").upper()
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
-                    # أسبوعي: المرساة = "المقاومة الحالية" (أحدث غير مخترقة) أو آخر مكسورة
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
                     t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55)
                     if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
-                    # يومي: المرساة = "المقاومة الحالية" على اليومي المؤكد
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
                     t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
-                    # تقريب حسب التيك (اختياري)
+                    # 🆕 الدعم الأسبوعي
+                    weekly_support = weekly_last_bullish55_low_value(df_w, pct=0.55)
+                    if tick_value and isinstance(weekly_support,(int,float)):
+                        weekly_support = round_to_tick(weekly_support, tick_value)
+
+                    # تقريب حسب التيك للأهداف (اختياري)
                     if tick_value:
                         if isinstance(weekly_t1, (int, float)): weekly_t1 = round_to_tick(weekly_t1, tick_value)
                         if isinstance(weekly_t2, (int, float)): weekly_t2 = round_to_tick(weekly_t2, tick_value)
@@ -647,15 +632,13 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         if isinstance(daily_t2,  (int, float)): daily_t2  = round_to_tick(daily_t2,  tick_value)
                         if isinstance(daily_t3,  (int, float)): daily_t3  = round_to_tick(daily_t3,  tick_value)
 
-                    # شهري: القوة والتسارع الشهري وفق شروط المدرسة (مع سلبية صريحة)
+                    # شهري: القوة والتسارع الشهري
                     df_m = resample_monthly_from_daily(df_d_conf, suffix)
                     monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
                     info_m = last_sell_anchor_info(df_m, pct=0.55) if (df_m is not None and not df_m.empty) else None
                     if info_m is not None:
                         Hm = float(info_m["H"]); Lm = float(info_m["L"]) 
-                        # نعتمد آخر إغلاق شهري مؤكَّد من df_m (وليس اليومي/الأسبوعي)
                         month_close = float(df_m["Close"].iat[-1])
-                        # احسب قاع آخر شمعة شرائية شهرية 55% (إن وجدت)، وإلا فـ Lm
                         dfm_calc = df_m[["Open","High","Low","Close"]].dropna().copy()
                         oM = dfm_calc["Open"].to_numpy(); hM = dfm_calc["High"].to_numpy()
                         lM = dfm_calc["Low"].to_numpy();  cM = dfm_calc["Close"].to_numpy()
@@ -685,6 +668,7 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         "الهدف الثاني (اسبوعي)": weekly_t2,
                         "الهدف الثالث (اسبوعي)": weekly_t3,
                         "القوة والتسارع الشهري": monthly_text,
+                        "الدعم الاسبوعي": weekly_support if weekly_support is not None else "—",
                     })
 
                 except Exception:
@@ -693,7 +677,6 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
             processed+=len(chunk_syms)
             prog.progress(min(processed/total,1.0), text=f"تمت معالجة {processed}/{total}")
 
-        # ===== إخراج الجدول =====
         if rows:
             columns_order = [
                 "اسم الشركة",
@@ -708,10 +691,10 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                 "الهدف الثاني (اسبوعي)",
                 "الهدف الثالث (اسبوعي)",
                 "القوة والتسارع الشهري",
+                "الدعم الاسبوعي",  # ← عمود أخير
             ]
             df_final = pd.DataFrame(rows)[columns_order]
 
-            # تنسيق أرقام للعرض — مع استثناء العمود النصّي الشهري
             non_numeric_cols = {"اسم الشركة", "الرمز", "القوة والتسارع الشهري"}
             for col in df_final.columns:
                 if col in non_numeric_cols: continue
