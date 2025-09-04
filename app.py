@@ -497,30 +497,40 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
 
     with st.spinner("⏳ نجلب البيانات ونحسب الأهداف..."):
         rows=[]
+        debug_rows=[]  # تقرير تشخيصي للأسباب
         total=len(symbols); prog=st.progress(0, text=f"بدء التحليل... (0/{total})"); processed=0
 
         for i in range(0,total,batch_size):
             chunk_syms=symbols[i:i+batch_size]
             ddata_chunk=fetch_data(" ".join(chunk_syms), start_date, end_date, "1d")
             if ddata_chunk is None or (isinstance(ddata_chunk,pd.DataFrame) and ddata_chunk.empty):
+                for code in chunk_syms:
+                    debug_rows.append({"الرمز": code, "السبب": "فشل الجلب من ياهو أو لا توجد بيانات"})
                 processed+=len(chunk_syms); prog.progress(min(processed/total,1.0), text=f"تمت معالجة {processed}/{total}"); continue
 
             for code in chunk_syms:
                 try:
+                    reasons=[]
                     df_d_raw=extract_symbol_df(ddata_chunk, code)
-                    if df_d_raw is None or df_d_raw.empty: continue
+                    if df_d_raw is None or df_d_raw.empty:
+                        debug_rows.append({"الرمز": code, "السبب": "لا توجد بيانات يومية من ياهو"})
+                        continue
 
                     # يومي مؤكد لاحتساب الأسابيع/الشهور المغلقة
                     df_d_conf = drop_last_if_incomplete(df_d_raw, "1d", suffix, allow_intraday_daily=False)
-                    if df_d_conf is None or df_d_conf.empty: continue
+                    if df_d_conf is None or df_d_conf.empty:
+                        debug_rows.append({"الرمز": code, "السبب": "اليومي المؤكد فارغ بعد استبعاد اليوم الجاري"})
+                        continue
 
                     # تجميع أسبوعي صحيح (الأسبوع غير المغلق يُستبعد)
                     df_w = resample_weekly_from_daily(df_d_conf, suffix)
-                    if df_w is None or df_w.empty: continue
+                    weekly_unavailable = (df_w is None or df_w.empty)
 
-                    # السعر المعروض: إغلاق الأسبوع الأخير المغلق أو آخر سعر يومي متاح إذا فُعل الخيار
-                    weekly_close = float(df_w["Close"].iat[-1])
-                    last_close = float(df_d_raw["Close"].iat[-1]) if allow_intraday_daily else weekly_close
+                    # السعر المعروض: وفق الاختيار + احتياط عند عدم توفر أسبوع
+                    if allow_intraday_daily:
+                        last_close = float(df_d_raw["Close"].iat[-1])
+                    else:
+                        last_close = float(df_w["Close"].iat[-1]) if not weekly_unavailable else float(df_d_conf["Close"].iat[-1])
 
                     # فلتر اختياري: يومي مؤكَّد + أسبوعي إيجابي + أول شهري
                     df_d = detect_breakout_with_state(df_d_conf)
@@ -528,21 +538,31 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     weekly_pos = weekly_state_from_daily(df_d_conf, suffix)
                     monthly_first = monthly_first_breakout_from_daily(df_d_conf, suffix)
                     if apply_triple_filter and not (daily_state_pos and weekly_pos and monthly_first):
+                        debug_rows.append({"الرمز": code, "السبب": f"فشل فلتر الاختراق (يومي={daily_state_pos}, أسبوعي={weekly_pos}, أول شهري={monthly_first})"})
                         continue
 
                     # أسماء
-                    sym=code.replace(suffix,"").upper()
+                    sym=code.replace(suffix, "").upper()
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
-                    # أسبوعي: المرساة = آخر اختراق أسبوعي (شمعة بيعية معتبرة)
+                    # أسبوعي: المرساة = آخر اختراق أسبوعي (شمعة بيعية 55%) — إن توفرت أسابيع مغلقة
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
-                    t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55)
-                    if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
+                    if not weekly_unavailable:
+                        t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55)
+                        if t_w is not None:
+                            weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
+                        else:
+                            reasons.append("لا يوجد اختراق أسبوعي بالإغلاق فوق قمم البيعية 55%")
+                    else:
+                        reasons.append("لا توجد أسابيع مغلقة كافية")
 
-                    # يومي: المرساة = آخر اختراق يومي (شمعة بيعية معتبرة)
+                    # يومي: المرساة = آخر اختراق يومي (شمعة بيعية 55%)
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
                     t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
-                    if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
+                    if t_d is not None:
+                        daily_H, daily_t1, daily_t2, daily_t3 = t_d
+                    else:
+                        reasons.append("لا يوجد اختراق يومي بالإغلاق فوق قمم البيعية 55%")
 
                     # تقريب حسب التيك (اختياري)
                     if tick_value:
@@ -588,7 +608,11 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         "القوة والتسارع الشهري": monthly_text,
                     })
 
-                except Exception:
+                    if reasons:
+                        debug_rows.append({"الرمز": sym, "السبب": "؛ ".join(reasons)})
+
+                except Exception as e:
+                    debug_rows.append({"الرمز": code, "السبب": f"استثناء أثناء المعالجة: {str(e)}"})
                     continue
 
             processed+=len(chunk_syms)
@@ -631,5 +655,17 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                 file_name="TriplePower_Targets_DailyWeekly.csv",
                 mime="text/csv"
             )
+
+            # تقرير تشخيصي اختياري
+            with st.expander("🧪 عرض تقرير تشخيصي لأسباب الاستبعاد/النواقص"):
+                if debug_rows:
+                    st.dataframe(pd.DataFrame(debug_rows))
+                else:
+                    st.write("لا توجد أسباب استبعاد — تمت معالجة كل الرموز.")
         else:
-            st.info("لا توجد بيانات كافية لحساب الأهداف على الفواصل المحددة.")
+            st.warning("لم يُقبل أي رمز للجدول. فعّل التقرير التشخيصي أدناه لمعرفة الأسباب.")
+            if 'debug_rows' in locals() and debug_rows:
+                with st.expander("🧪 تقرير تشخيصي"):
+                    st.dataframe(pd.DataFrame(debug_rows))
+            else:
+                st.info("قد يكون السبب: فشل فلتر الاختراق لكل الرموز، أو لا توجد بيانات من ياهو، أو أن الفترة قصيرة جدًا.")
