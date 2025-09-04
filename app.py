@@ -619,7 +619,7 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
 
                     # يومي: قمة وأهداف من آخر شمعة بيعية معتبرة على اليومي المؤكَّد
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    t_d = last_sell_anchor_targets(df_d_conf, pct=0.55)
+                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
                     # تقريب حسب التيك (اختياري)
@@ -716,3 +716,68 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
             )
         else:
             st.info("لا توجد بيانات كافية لحساب الأهداف الأسبوعية على الفاصل المحدد.")
+
+
+# جديد: اختيار المرساة اليومية بناءً على "آخر اختراق يومي"
+# المرساة المطلوبة هي قمة الشمعة البيعية اليومية التي كان اختراقُ قمتها
+# هو "آخر" إشارة اختراق (أحدث إغلاق يومي فوق قمة شمعة بيعية 55% معتبرة).
+
+def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
+    if _df is None or _df.empty:
+        return None
+    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    o = df["Open"].to_numpy(); h = df["High"].to_numpy()
+    l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
+
+    # تعريف شموع 55%
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)   # بيعية 55%
+    win55  = (c > o) & (br >= pct) & (rng != 0)   # شرائية 55%
+
+    # آخر قاع شرائي 55% قبل كل نقطة
+    last_win_low = np.full(c.shape, np.nan)
+    cur = np.nan
+    for i in range(len(c)):
+        if win55[i]:
+            cur = l[i]
+        last_win_low[i] = cur
+
+    # أصغر قاع مستقبلي لتحقيق شرط "الكسر لاحقًا"
+    future_min = np.minimum.accumulate(l[::-1])[::-1]
+
+    # الشموع البيعية المعتبرة: كسرت القاع الشرائي الآن أو لاحقًا
+    considered_sell = (
+        lose55 &
+        ~np.isnan(last_win_low) &
+        ((l <= last_win_low) | (future_min <= last_win_low))
+    )
+    anchors = np.where(considered_sell)[0]
+    if len(anchors) == 0:
+        return None
+
+    # لكل مرساة، أول إغلاق لاحق أعلى من قمتها (لحظة الاختراق)
+    breakout_events = []  # (t_break, j_anchor)
+    for j in anchors:
+        later = np.where(c[j+1:] > h[j])[0]
+        if len(later) == 0:
+            continue
+        t_break = int(j + 1 + later[0])
+        breakout_events.append((t_break, j))
+
+    if len(breakout_events) == 0:
+        return None
+
+    # اختر آخر اختراق يومي (الأحدث)
+    t_last, j_last = max(breakout_events, key=lambda x: x[0])
+
+    H = float(h[j_last]); L = float(l[j_last]); R = H - L
+    if not np.isfinite(R) or R <= 0:
+        return None
+
+    return (
+        round(H, 2),
+        round(H + 1.0*R, 2),
+        round(H + 2.0*R, 2),
+        round(H + 3.0*R, 2)
+    )
