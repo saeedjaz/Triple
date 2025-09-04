@@ -381,7 +381,7 @@ def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
-    return {"H": H, "L": L, "R": R, "anchor_idx": j_last, "break_idx": t_last}
+    return {"H": H, "L": L, "R": R, "anchor_idx": j_last, "break_idx": t_last, "anchor_is_sell55": bool(lose55[j_last])}
 
 # =============================
 # التجميع الأسبوعي/الشهري من اليومي المؤكد
@@ -674,6 +674,8 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
                     # يومي: المرساة = آخر اختراق يومي (على اليومي المؤكد)
+                    # ملاحظة: يتم اختيار قمة "شمعة بيعية 55%" فقط (وليس شرائية)،
+                    # وذلك من خلال daily_latest_breakout_anchor_info الذي يبني anchors من lose55 حصراً.
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
                     info_d = daily_latest_breakout_anchor_info(df_d_conf, pct=0.55)
                     if info_d is not None:
