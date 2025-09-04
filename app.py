@@ -547,7 +547,7 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
 
                     # شهري: القوة والتسارع الشهري وفق المدرسة
                     df_m = resample_monthly_from_daily(df_d_conf, suffix)
-                    monthly_text = "لا توجد شمعة بيعية شهرية معتبرة"
+                    monthly_text = "—"
                     info_m = last_sell_anchor_info(df_m, pct=0.55) if (df_m is not None and not df_m.empty) else None
                     if info_m is not None:
                         Hm = float(info_m["H"]); Lm = float(info_m["L"]) 
