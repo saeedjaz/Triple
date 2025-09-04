@@ -187,63 +187,62 @@ def _body_ratio(c,o,h,l):
 
 def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     """
-    اختيار المرساة (الشمعة البيعية المعتبرة) بطريقة متوافقة مع المدرسة:
-    - نبحث عن آخر شمعة شرائية 55% تم كسر قاعها لاحقًا داخل السلسلة.
-    - نحدد أول لحظة كسر لذلك القاع.
-    - المرساة = آخر شمعة بيعية 55% بين الشرائية ولحظة الكسر (شاملة).
-    يعيد dict: idx/H/L/R حيث H=قمة الشمعة البيعية المختارة، L=قاعها، R=H-L.
+    تُرجع dict تحتوي idx/H/L/R لآخر شمعة بيعية 55% كسرت قاع شمعة شرائية 55%
+    (بنفسها أو لاحقًا) — وفق منطق المدرسة الأصلي.
+    لا يتم تقريب H/L هنا للحفاظ على الدقة؛ التقريب يكون عند الإخراج فقط.
     """
     if _df is None or _df.empty:
         return None
-
     df = _df[["Open","High","Low","Close"]].dropna().copy()
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    br, rng = _body_ratio(c,o,h,l)
-    lose55 = (c < o) & (br >= pct) & (rng != 0)   # بيعية 55%
-    win55  = (c > o) & (br >= pct) & (rng != 0)   # شرائية 55%
+    # تعريف شموع 55%
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)  # بيعية معتبرة
+    win55  = (c > o) & (br >= pct) & (rng != 0)  # شرائية معتبرة
 
-    # ابحث عكسيًا عن آخر شرائية 55% كُسر قاعها لاحقًا
-    last_win_idx = -1
-    for i in range(len(c)-1, -1, -1):
+    # آخر قاع شرائي 55% قبل كل نقطة
+    last_win_low = np.full(c.shape, np.nan)
+    cur = np.nan
+    for i in range(len(c)):
         if win55[i]:
-            if np.nanmin(l[i:]) <= l[i]:
-                last_win_idx = i
-                break
-    if last_win_idx == -1:
+            cur = l[i]
+        last_win_low[i] = cur
+
+    # أصغر قاع مستقبلي (لتحقيق شرط "الكسر لاحقًا")
+    future_min = np.minimum.accumulate(l[::-1])[::-1]
+
+    # الشمعة البيعية المعتبرة: كسرت القاع الشرائي الآن أو لاحقًا
+    considered_sell = (
+        lose55 &
+        ~np.isnan(last_win_low) &
+        ((l <= last_win_low) | (future_min <= last_win_low))
+    )
+
+    idx = np.where(considered_sell)[0]
+    if len(idx) == 0:
         return None
 
-    # أول لحظة كسر لقاع هذه الشرائية
-    break_idx = -1
-    for j in range(last_win_idx, len(c)):
-        if l[j] <= l[last_win_idx]:
-            break_idx = j
-            break
-    if break_idx == -1:
-        return None
-
-    # آخر شمعة بيعية 55% بين الشرائية ولحظة الكسر (شاملة)
-    sell_indices = [k for k in range(last_win_idx+1, break_idx+1) if lose55[k]]
-    if not sell_indices:
-        return None
-
-    j = sell_indices[-1]
+    j = int(idx[-1])
     H = float(h[j]); L = float(l[j]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
-    return {"idx": j, "H": round(H,2), "L": round(L,2), "R": round(R,2)}
+    return {"idx": j, "H": H, "L": L, "R": R}
 
 
 def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     """
-    تُرجع (H, T1, T2, T3) بحسب آخر شمعة بيعية 55% المعتبرة المحددة أعلاه.
+    تُرجع (H, T1, T2, T3) بحسب آخر شمعة بيعية 55% المعتبرة.
     الأهداف وفق مدرسة القوة الثلاثية (مقياس +100/+200/+300 من H):
       T1 = H + 1*R,  T2 = H + 2*R,  T3 = H + 3*R  حيث R = H - L.
+    الحساب يتم بقيم H/L الدقيقة دون تقريب مسبق، ثم يُقرّب الناتج للعرض.
     """
     info = last_sell_anchor_info(_df, pct=pct)
-    if info is None: return None
-    H, L = info["H"], info["L"]
+    if info is None:
+        return None
+    H = float(info["H"]); L = float(info["L"])
     R = H - L
     return (
         round(H, 2),
