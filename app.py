@@ -343,6 +343,46 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         round(H + 3.0*R, 2)
     )
 
+# معلومات مفصلة لآخر اختراق يومي: تُعيد H/L/R ومؤشرات المرساة والاختراق
+
+def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
+    if _df is None or _df.empty:
+        return None
+    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    o = df["Open"].to_numpy(); h = df["High"].to_numpy()
+    l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
+
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)
+    win55  = (c > o) & (br >= pct) & (rng != 0)
+
+    last_win_low = np.full(c.shape, np.nan)
+    cur = np.nan
+    for i in range(len(c)):
+        if win55[i]: cur = l[i]
+        last_win_low[i] = cur
+    future_min = np.minimum.accumulate(l[::-1])[::-1]
+
+    anchors = np.where( lose55 & ~np.isnan(last_win_low) & ((l <= last_win_low) | (future_min <= last_win_low)) )[0]
+    if len(anchors) == 0:
+        return None
+
+    events = []  # (t_break, j_anchor)
+    for j in anchors:
+        later = np.where(c[j+1:] > h[j])[0]
+        if len(later) == 0: continue
+        t_break = int(j + 1 + later[0])
+        events.append((t_break, j))
+    if len(events) == 0:
+        return None
+
+    t_last, j_last = max(events, key=lambda x: x[0])
+    H = float(h[j_last]); L = float(l[j_last]); R = H - L
+    if not np.isfinite(R) or R <= 0:
+        return None
+    return {"H": H, "L": L, "R": R, "anchor_idx": j_last, "break_idx": t_last}
+
 # =============================
 # التجميع الأسبوعي/الشهري من اليومي المؤكد
 # =============================
@@ -635,8 +675,13 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
 
                     # يومي: المرساة = آخر اختراق يومي (على اليومي المؤكد)
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
-                    if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
+                    info_d = daily_latest_breakout_anchor_info(df_d_conf, pct=0.55)
+                    if info_d is not None:
+                        Hd = float(info_d["H"]); Ld = float(info_d["L"]); Rd = Hd - Ld
+                        daily_H = round(Hd, 2)
+                        daily_t1 = round(Hd + 1.0*Rd, 2)
+                        daily_t2 = round(Hd + 2.0*Rd, 2)
+                        daily_t3 = round(Hd + 3.0*Rd, 2)
 
                     # تقريب حسب التيك (اختياري)
                     if tick_value:
