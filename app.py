@@ -5,8 +5,8 @@
 # (بنفسها أو لاحقًا) وفق شرط 55%.
 # 
 # الأعمدة المعروضة:
-#   • اليومي: قمة الشمعة البيعية اليومية + 3 أهداف
-#   • الأسبوعي: قمة الشمعة البيعية الأسبوعية (آخر اختراق أسبوعي) + 3 أهداف
+#   • اليومي: قمة آخر شمعة بيعية يومية مُخترَقة + 3 أهداف
+#   • الأسبوعي: قمة الشمعة البيعية الأسبوعية التي كان اختراق قمتها هو آخر اختراق أسبوعي + 3 أهداف
 #   • القوة والتسارع الشهري: نص بحسب المقارنة مع آخر شمعة بيعية شهرية معتبرة
 # 
 # حساب الأهداف وفق مدرسة القوة الثلاثية:
@@ -16,6 +16,7 @@
 #   • الجلب من Yahoo غير معدّل (auto_adjust=False) لضمان تطابق H/L مع TradingView.
 #   • يتم استبعاد الأسبوع/الشهر الجاري غير المغلق من التجميع.
 #   • خيار تقريب الأهداف حسب قيمة التيك (اختياري).
+#   • توحيد المنطقة الزمنية قبل إعادة التجميع (Asia/Riyadh للسعودي، America/New_York للأمريكي).
 # =========================================================
 
 import os, re, hashlib, secrets, base64
@@ -183,12 +184,24 @@ def drop_last_if_incomplete(df: pd.DataFrame, tf: str, suffix: str, allow_intrad
     return dfx
 
 # =============================
-# منطق 55% (بيعية/شرائية) + مراسي الاختراق
+# منطق 55% (بيعية/شرائية) + مراسي "آخر اختراق"
 # =============================
 
-def _body_ratio(c,o,h,l):
-    rng=(h-l)
-    return np.where(rng!=0, np.abs(c-o)/rng, 0.0), rng
+def _considered_sell_mask(o,h,l,c,pct=0.55):
+    """إرجاع قناع الشموع البيعية 55% المعتبرة التي كسرت قاع شرائية 55% (الآن أو لاحقًا)."""
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)
+    win55  = (c > o) & (br >= pct) & (rng != 0)
+    last_win_low = np.full(c.shape, np.nan)
+    cur = np.nan
+    for i in range(len(c)):
+        if win55[i]:
+            cur = l[i]
+        last_win_low[i] = cur
+    future_min = np.minimum.accumulate(l[::-1])[::-1]
+    considered_sell = lose55 & ~np.isnan(last_win_low) & ((l <= last_win_low) | (future_min <= last_win_low))
+    return considered_sell
 
 
 def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
@@ -203,28 +216,7 @@ def last_sell_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    rng = (h - l)
-    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
-    lose55 = (c < o) & (br >= pct) & (rng != 0)
-    win55  = (c > o) & (br >= pct) & (rng != 0)
-
-    # آخر قاع شرائي 55% قبل كل نقطة
-    last_win_low = np.full(c.shape, np.nan)
-    cur = np.nan
-    for i in range(len(c)):
-        if win55[i]:
-            cur = l[i]
-        last_win_low[i] = cur
-
-    # أصغر قاع مستقبلي (يحقق "الكسر لاحقًا")
-    future_min = np.minimum.accumulate(l[::-1])[::-1]
-
-    considered_sell = (
-        lose55 &
-        ~np.isnan(last_win_low) &
-        ((l <= last_win_low) | (future_min <= last_win_low))
-    )
-
+    considered_sell = _considered_sell_mask(o,h,l,c,pct)
     idx = np.where(considered_sell)[0]
     if len(idx) == 0:
         return None
@@ -253,7 +245,7 @@ def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         round(H + 3.0*R, 2)
     )
 
-# — آخر اختراق أسبوعي: نختار المرساة التي كان اختراق قمتها أحدث إغلاق فوقها
+# — آخر اختراق أسبوعي: نختار المرساة (شمعة بيعية معتبرة) التي كان اختراق قمتها أحدث إغلاق فوقها
 
 def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if _df is None or _df.empty:
@@ -262,32 +254,21 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    rng = (h - l)
-    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
-    lose55 = (c < o) & (br >= pct) & (rng != 0)
-    win55  = (c > o) & (br >= pct) & (rng != 0)
-
-    last_win_low = np.full(c.shape, np.nan)
-    cur = np.nan
-    for i in range(len(c)):
-        if win55[i]: cur = l[i]
-        last_win_low[i] = cur
-    future_min = np.minimum.accumulate(l[::-1])[::-1]
-
-    anchors = np.where(lose55)[0]
+    considered_sell = _considered_sell_mask(o,h,l,c,pct)
+    anchors = np.where(considered_sell)[0]
     if len(anchors) == 0:
         return None
 
     events = []  # (t_break, j_anchor)
     for j in anchors:
-        later = np.where(c[j+1:] > h[j])[0]
+        later = np.where(c[j+1:] >= h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
         events.append((t_break, j))
     if len(events) == 0:
         return None
 
-    t_last, j_last = max(events, key=lambda x: (x[0], x[1]))
+    _, j_last = max(events, key=lambda x: (x[0], x[1]))
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
@@ -298,7 +279,7 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         round(H + 3.0*R, 2)
     )
 
-# — آخر اختراق يومي: نختار المرساة التي كان اختراق قمتها أحدث إغلاق فوقها
+# — آخر اختراق يومي: نختار المرساة (شمعة بيعية معتبرة) التي كان اختراق قمتها أحدث إغلاق فوقها
 
 def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if _df is None or _df.empty:
@@ -307,25 +288,13 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    rng = (h - l)
-    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
-    lose55 = (c < o) & (br >= pct) & (rng != 0)
-    win55  = (c > o) & (br >= pct) & (rng != 0)
-
-    last_win_low = np.full(c.shape, np.nan)
-    cur = np.nan
-    for i in range(len(c)):
-        if win55[i]: cur = l[i]
-        last_win_low[i] = cur
-    future_min = np.minimum.accumulate(l[::-1])[::-1]
-
-    anchors = np.where(lose55)[0]
+    considered_sell = _considered_sell_mask(o,h,l,c,pct)
+    anchors = np.where(considered_sell)[0]
     if len(anchors) == 0:
         return None
 
     events = []  # (t_break, j_anchor)
     for j in anchors:
-        # اختراق يومي يُحسب عند الإغلاق "أعلى أو مساوٍ" لقمة الشمعة البيعية (≥ H)
         later = np.where(c[j+1:] >= h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
@@ -333,7 +302,7 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if len(events) == 0:
         return None
 
-    t_last, j_last = max(events, key=lambda x: (x[0], x[1]))
+    _, j_last = max(events, key=lambda x: (x[0], x[1]))
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
@@ -344,7 +313,7 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         round(H + 3.0*R, 2)
     )
 
-# معلومات مفصلة لآخر اختراق يومي: تُعيد H/L/R ومؤشرات المرساة والاختراق
+# معلومات مفصلة لآخر اختراق يومي (للتشخيص أو التوسعة لاحقًا)
 
 def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     if _df is None or _df.empty:
@@ -353,25 +322,13 @@ def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    rng = (h - l)
-    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
-    lose55 = (c < o) & (br >= pct) & (rng != 0)
-    win55  = (c > o) & (br >= pct) & (rng != 0)
-
-    last_win_low = np.full(c.shape, np.nan)
-    cur = np.nan
-    for i in range(len(c)):
-        if win55[i]: cur = l[i]
-        last_win_low[i] = cur
-    future_min = np.minimum.accumulate(l[::-1])[::-1]
-
-    anchors = np.where(lose55)[0]
+    considered_sell = _considered_sell_mask(o,h,l,c,pct)
+    anchors = np.where(considered_sell)[0]
     if len(anchors) == 0:
         return None
 
-    events = []  # (t_break, j_anchor)
+    events = []
     for j in anchors:
-        # اختراق يومي يُحسب عند الإغلاق "أعلى أو مساوٍ" لقمة الشمعة البيعية (≥ H)
         later = np.where(c[j+1:] >= h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
@@ -383,11 +340,23 @@ def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
-    return {"H": H, "L": L, "R": R, "anchor_idx": j_last, "break_idx": t_last, "anchor_is_sell55": bool(lose55[j_last])}
+    return {"H": H, "L": L, "R": R, "anchor_idx": j_last, "break_idx": t_last, "anchor_is_sell55": True}
 
 # =============================
-# التجميع الأسبوعي/الشهري من اليومي المؤكد
+# التجميع الأسبوعي/الشهري من اليومي المؤكد + توحيد المنطقة الزمنية
 # =============================
+
+def ensure_local_tz(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    """توحيد المنطقة الزمنية قبل إعادة التجميع لتتوافق حدود الأسبوع/الشهر مع المنصة."""
+    tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
+    dfx = df.copy()
+    dfx["Date"] = pd.to_datetime(dfx["Date"])
+    if getattr(dfx["Date"].dt, "tz", None) is None:
+        dfx["Date"] = dfx["Date"].dt.tz_localize(tz)
+    else:
+        dfx["Date"] = dfx["Date"].dt.tz_convert(tz)
+    return dfx
+
 
 def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
@@ -411,6 +380,7 @@ def resample_weekly_from_daily(df_daily: pd.DataFrame, suffix: str) -> pd.DataFr
         return df_daily.iloc[0:0]
 
     dfw = df_daily[["Date", "Open", "High", "Low", "Close"]].dropna().copy()
+    dfw = ensure_local_tz(dfw, suffix)
     dfw.set_index("Date", inplace=True)
     rule = "W-THU" if suffix == ".SR" else "W-FRI"
     dfw = dfw.resample(rule).agg({
@@ -433,6 +403,7 @@ def resample_monthly_from_daily(df_daily: pd.DataFrame, suffix: str)->pd.DataFra
     df_daily=drop_last_if_incomplete(df_daily,"1d",suffix,False)
     if df_daily.empty: return df_daily.iloc[0:0]
     dfm=df_daily[["Date","Open","High","Low","Close"]].dropna().copy()
+    dfm = ensure_local_tz(dfm, suffix)
     dfm.set_index("Date",inplace=True)
     dfm=dfm.resample("M").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().reset_index()
     tz=ZoneInfo("Asia/Riyadh" if suffix==".SR" else "America/New_York")
@@ -670,22 +641,15 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     sym=code.replace(suffix,"").upper()
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
-                    # أسبوعي: المرساة = آخر اختراق أسبوعي
+                    # أسبوعي: المرساة = آخر اختراق أسبوعي (شمعة بيعية معتبرة)
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
                     t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55)
                     if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
-                    # يومي: المرساة = آخر اختراق يومي (على اليومي المؤكد)
-                    # ملاحظة: يتم اختيار قمة "شمعة بيعية 55%" فقط (وليس شرائية)،
-                    # وذلك من خلال daily_latest_breakout_anchor_info الذي يبني anchors من lose55 حصراً.
+                    # يومي: المرساة = آخر اختراق يومي (شمعة بيعية معتبرة)
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    info_d = daily_latest_breakout_anchor_info(df_d_conf, pct=0.55)
-                    if info_d is not None:
-                        Hd = float(info_d["H"]); Ld = float(info_d["L"]); Rd = Hd - Ld
-                        daily_H = round(Hd, 2)
-                        daily_t1 = round(Hd + 1.0*Rd, 2)
-                        daily_t2 = round(Hd + 2.0*Rd, 2)
-                        daily_t3 = round(Hd + 3.0*Rd, 2)
+                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
+                    if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
                     # تقريب حسب التيك (اختياري)
                     if tick_value:
