@@ -287,7 +287,7 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if len(events) == 0:
         return None
 
-    _, j_last = max(events, key=lambda x: x[0])
+    t_last, j_last = max(events, key=lambda x: (x[0], x[1]))
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
@@ -333,7 +333,7 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if len(events) == 0:
         return None
 
-    _, j_last = max(events, key=lambda x: x[0])
+    t_last, j_last = max(events, key=lambda x: (x[0], x[1]))
     H = float(h[j_last]); L = float(l[j_last]); R = H - L
     if not np.isfinite(R) or R <= 0:
         return None
