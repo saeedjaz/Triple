@@ -325,7 +325,8 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
 
     events = []  # (t_break, j_anchor)
     for j in anchors:
-        later = np.where(c[j+1:] > h[j])[0]
+        # اختراق يومي يُحسب عند الإغلاق "أعلى أو مساوٍ" لقمة الشمعة البيعية (≥ H)
+        later = np.where(c[j+1:] >= h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
         events.append((t_break, j))
@@ -370,7 +371,8 @@ def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
 
     events = []  # (t_break, j_anchor)
     for j in anchors:
-        later = np.where(c[j+1:] > h[j])[0]
+        # اختراق يومي يُحسب عند الإغلاق "أعلى أو مساوٍ" لقمة الشمعة البيعية (≥ H)
+        later = np.where(c[j+1:] >= h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
         events.append((t_break, j))
