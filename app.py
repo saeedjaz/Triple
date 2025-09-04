@@ -248,20 +248,24 @@ def last_sell_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
 # — آخر اختراق أسبوعي: نختار المرساة (شمعة بيعية معتبرة) التي كان اختراق قمتها أحدث إغلاق فوقها
 
 def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
+    """قمة الشمعة البيعية الأسبوعية = قمة الشمعة البيعية 55% التي تم اختراقها في آخر اختراق أسبوعي (close > high)."""
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
     o = df["Open"].to_numpy(); h = df["High"].to_numpy()
     l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
 
-    considered_sell = _considered_sell_mask(o,h,l,c,pct)
-    anchors = np.where(considered_sell)[0]
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)
+
+    anchors = np.where(lose55)[0]
     if len(anchors) == 0:
         return None
 
     events = []  # (t_break, j_anchor)
     for j in anchors:
-        later = np.where(c[j+1:] >= h[j])[0]
+        later = np.where(c[j+1:] > h[j])[0]
         if len(later) == 0: continue
         t_break = int(j + 1 + later[0])
         events.append((t_break, j))
@@ -280,6 +284,42 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     )
 
 # — آخر اختراق يومي: نختار المرساة (شمعة بيعية معتبرة) التي كان اختراق قمتها أحدث إغلاق فوقها
+
+def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
+    """قمة الشمعة البيعية اليومية = قمة الشمعة البيعية 55% التي تم اختراقها في آخر اختراق يومي (close > high)."""
+    if _df is None or _df.empty:
+        return None
+    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    o = df["Open"].to_numpy(); h = df["High"].to_numpy()
+    l = df["Low"].to_numpy();  c = df["Close"].to_numpy()
+
+    rng = (h - l)
+    br  = np.where(rng != 0, np.abs(c - o) / rng, 0.0)
+    lose55 = (c < o) & (br >= pct) & (rng != 0)
+
+    anchors = np.where(lose55)[0]
+    if len(anchors) == 0:
+        return None
+
+    events = []  # (t_break, j_anchor)
+    for j in anchors:
+        later = np.where(c[j+1:] > h[j])[0]
+        if len(later) == 0: continue
+        t_break = int(j + 1 + later[0])
+        events.append((t_break, j))
+    if len(events) == 0:
+        return None
+
+    _, j_last = max(events, key=lambda x: (x[0], x[1]))
+    H = float(h[j_last]); L = float(l[j_last]); R = H - L
+    if not np.isfinite(R) or R <= 0:
+        return None
+    return (
+        round(H, 2),
+        round(H + 1.0*R, 2),
+        round(H + 2.0*R, 2),
+        round(H + 3.0*R, 2)
+    ): نختار المرساة (شمعة بيعية معتبرة) التي كان اختراق قمتها أحدث إغلاق فوقها
 
 def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     if _df is None or _df.empty:
