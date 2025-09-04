@@ -833,10 +833,10 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     if t_w is not None:
                         weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
-                    # يومي: المرساة = آخر اختراق يومي (على اليومي المؤكَّد)
+                    # يومي (مدرسة القوة): المرساة = آخر شمعة بيعية 55% كسرت قاع شمعة شرائية 55% (بنفسها أو لاحقًا)
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—", "—", "—", "—")
-                    t_d = daily_latest_breakout_anchor_targets(
-                        df_d_conf, pct=0.55, tick=(tick_value if tick_value else None)
+                    t_d = last_sell_anchor_targets(
+                        df_d_conf, pct=0.55
                     )
                     if t_d is not None:
                         daily_H, daily_t1, daily_t2, daily_t3 = t_d
