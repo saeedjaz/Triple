@@ -595,10 +595,12 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
             ]
             df_final = pd.DataFrame(rows)[columns_order]
 
-            # تنسيق أرقام للعرض
+            # تنسيق أرقام للعرض — مع استثناء العمود النصّي الشهري
+            non_numeric_cols = {"اسم الشركة", "الرمز", "القوة والتسارع الشهري"}
             for col in df_final.columns:
-                if col in {"اسم الشركة","الرمز"}: continue
-                df_final[col]=df_final[col].apply(lambda x: _fmt_num(x))
+                if col in non_numeric_cols:
+                    continue
+                df_final[col] = df_final[col].apply(lambda x: _fmt_num(x))
 
             market_name="السوق السعودي" if suffix==".SR" else "السوق الأمريكي"
             day_str=f"{end_date.day}-{end_date.month}-{end_date.year}"
