@@ -274,7 +274,7 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         last_win_low[i] = cur
     future_min = np.minimum.accumulate(l[::-1])[::-1]
 
-    anchors = np.where( lose55 & ~np.isnan(last_win_low) & ((l <= last_win_low) | (future_min <= last_win_low)) )[0]
+    anchors = np.where(lose55)[0]
     if len(anchors) == 0:
         return None
 
@@ -319,7 +319,7 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
         last_win_low[i] = cur
     future_min = np.minimum.accumulate(l[::-1])[::-1]
 
-    anchors = np.where( lose55 & ~np.isnan(last_win_low) & ((l <= last_win_low) | (future_min <= last_win_low)) )[0]
+    anchors = np.where(lose55)[0]
     if len(anchors) == 0:
         return None
 
@@ -365,7 +365,7 @@ def daily_latest_breakout_anchor_info(_df: pd.DataFrame, pct: float = 0.55):
         last_win_low[i] = cur
     future_min = np.minimum.accumulate(l[::-1])[::-1]
 
-    anchors = np.where( lose55 & ~np.isnan(last_win_low) & ((l <= last_win_low) | (future_min <= last_win_low)) )[0]
+    anchors = np.where(lose55)[0]
     if len(anchors) == 0:
         return None
 
