@@ -274,10 +274,10 @@ def _enumerate_sell_anchors_with_break(df: pd.DataFrame, pct: float=0.55):
 
 
 def _select_current_anchor(anchors, mode: str):
-    """اختيار المرساة بحسب السياسة:
+    """اختيار المرساة بحسب سياسة ثابتة (احتياطي).
     - "unbroken": أحدث مرساة غير مخترقة؛ وإن لم توجد فـ "أول اختراق".
-    - "first_break": أقدم مرساة تم اختراقها (أول اختراق في الموجة)؛ وإن لم توجد فـ أحدث غير مخترقة.
-    - "last_break": أحدث مرساة تم اختراقها تاريخيًا؛ وإن لم توجد فـ أحدث غير مخترقة.
+    - "first_break": أقدم مرساة تم اختراقها؛ وإن لم توجد فـ أحدث غير مخترقة.
+    - "last_break": أحدث مرساة تم اختراقها؛ وإن لم توجد فـ أحدث غير مخترقة.
     """
     if not anchors:
         return None
@@ -305,60 +305,85 @@ def _select_current_anchor(anchors, mode: str):
     return min(broken, key=lambda a: a["t_break"]) if broken else None
 
 
-def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
-    """ترجيع أهداف الأسبوعي وفق سياسة اختيار المرساة.
-    - في وضع "first_break" نقيّد الاختيار بكون الاختراق حدث *بعد آخر إشارة شراء أسبوعية* (بداية الموجة)،
-      لتطابق TradingView.
+def _select_anchor_auto(anchors, start_i: int):
+    """اختيار ذكي تلقائي وفق مدرسة TriplePower:
+    1) إن وُجدت مرساة غير مخترقة بعد بداية الموجة ⇒ نختار أحدثها (المقاومة الحالية).
+    2) وإلا إن وُجدت مراسي مكسورة بعد البداية ⇒ نختار أول اختراق بعد البداية.
+    3) وإلا إن وُجدت مراسي غير مخترقة إجمالًا ⇒ نختار أحدثها (أقرب مقاومة عامة).
+    4) وإلا إن وُجدت مراسي مكسورة فقط ⇒ نختار أقدم اختراق إجمالًا.
+    تُعيد العنصر المختار مع سبب ضمن المفتاح why.
+    """
+    if not anchors:
+        return None
+    unbroken_after = [a for a in anchors if a["t_break"] is None and a["j"] >= start_i]
+    if unbroken_after:
+        pick = max(unbroken_after, key=lambda a: a["j"])  # الأقرب زمنيًا بعد البداية
+        pick["why"] = "current_unbroken_after_start"
+        return pick
+    broken_after = [a for a in anchors if a["t_break"] is not None and a["t_break"] >= start_i]
+    if broken_after:
+        pick = min(broken_after, key=lambda a: a["t_break"])  # أول اختراق بعد البداية
+        pick["why"] = "first_break_after_start"
+        return pick
+    unbroken_any = [a for a in anchors if a["t_break"] is None]
+    if unbroken_any:
+        pick = max(unbroken_any, key=lambda a: a["j"])  # أقرب مقاومة عامة
+        pick["why"] = "latest_unbroken_overall"
+        return pick
+    broken_any = [a for a in anchors if a["t_break"] is not None]
+    if broken_any:
+        pick = min(broken_any, key=lambda a: a["t_break"])  # أقدم اختراق إجمالاً
+        pick["why"] = "first_break_overall"
+        return pick
+    return None
+    elif mode == "first_break":
+        broken = [a for a in anchors if a["t_break"] is not None]
+        if broken:
+            return min(broken, key=lambda a: a["t_break"])  # أول اختراق في الموجة
+        return max(anchors, key=lambda a: a["j"])  # fallback: أحدث غير مخترقة
+    elif mode == "last_break":
+        broken = [a for a in anchors if a["t_break"] is not None]
+        if broken:
+            return max(broken, key=lambda a: a["t_break"])  # آخر اختراق تاريخي
+        return max(anchors, key=lambda a: a["j"])  # fallback
+    # افتراضيًا: سلوك المقاومة الحالية
+    unbroken = [a for a in anchors if a["t_break"] is None]
+    if unbroken:
+        return max(unbroken, key=lambda a: a["j"]) 
+    broken = [a for a in anchors if a["t_break"] is not None]
+    return min(broken, key=lambda a: a["t_break"]) if broken else None
+
+
+def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "auto"):
+    """أهداف الأسبوعي باختيار تلقائي ذكي للمرساة.
     يعيد: ((H, T1, T2, T3), info) أو (None, None)
     """
     if _df is None or _df.empty:
         return None, None
-    # إطار عمل داخلي نظيف
     df = _df[["Open","High","Low","Close"]].dropna().copy()
-    # حساب جميع المراسي
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
 
-    # وظيفة داخلية: إيجاد مؤشر آخر إشارة شراء أسبوعية (بداية موجة)
-    def _last_weekly_first_buy_index(_df_ohlc: pd.DataFrame) -> int:
-        tmp = detect_breakout_with_state(_df_ohlc.copy(), pct=pct)
-        if tmp is None or tmp.empty or "FirstBuySig" not in tmp.columns:
-            return 0
+    # بداية الموجة = آخر FirstBuySig أسبوعية
+    tmp = detect_breakout_with_state(df.copy(), pct=pct)
+    start_i = 0
+    if tmp is not None and not tmp.empty and "FirstBuySig" in tmp.columns:
         idx = np.where(tmp["FirstBuySig"].to_numpy())[0]
-        return int(idx[-1]) if len(idx) else 0
+        if len(idx): start_i = int(idx[-1])
 
-    pick = None
-    if mode == "first_break":
-        start_i = _last_weekly_first_buy_index(df)
-        broken_after = [a for a in anchors if a["t_break"] is not None and a["t_break"] >= start_i]
-        if broken_after:
-            pick = min(broken_after, key=lambda a: a["t_break"])  # أول اختراق بعد بداية الموجة
-        else:
-            broken = [a for a in anchors if a["t_break"] is not None]
-            if broken:
-                pick = min(broken, key=lambda a: a["t_break"])  # أقدم اختراق إجمالاً
-            else:
-                unbroken = [a for a in anchors if a["t_break"] is None]
-                if unbroken:
-                    pick = max(unbroken, key=lambda a: a["j"])       # أحدث غير مخترقة
-    else:
-        # بقية الأوضاع تستعمل المحدِّد العام
-        pick = _select_current_anchor(anchors, mode)
-
+    pick = _select_anchor_auto(anchors, start_i) if mode == "auto" else _select_current_anchor(anchors, mode)
     if (not pick) or (not np.isfinite(pick["R"])) or (pick["R"] <= 0):
         return None, None
 
     H = float(pick["H"]) ; L = float(pick["L"]) ; R = float(pick["R"]) ; j = int(pick["j"])  
-    # تاريخ الشمعة الأسبوعية من _df الأصلي
+    # تاريخ الشمعة الأسبوعية
     try:
-        if "Date" in _df.columns:
-            date_val = pd.to_datetime(_df["Date"].iloc[j]).date()
-        else:
-            date_val = pd.to_datetime(_df.index[j]).date()
+        date_val = pd.to_datetime(_df["Date"].iloc[j]).date() if "Date" in _df.columns else pd.to_datetime(_df.index[j]).date()
     except Exception:
         date_val = None
 
     info = {"date": str(date_val) if date_val else None,
-            "H": round(H,2), "L": round(L,2), "R": round(R,2)}
+            "H": round(H,2), "L": round(L,2), "R": round(R,2),
+            "why": pick.get("why","auto")}
 
     t1 = round(H + 1.0 * R, 2)
     t2 = round(H + 2.0 * R, 2)
@@ -367,53 +392,23 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, 
 
 
 
-def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
-    """ترجيع أهداف اليومي وفق سياسة اختيار المرساة.
-    - في وضع "first_break":
-        1) نفضّل أحدث مرساة غير مخترقة بعد بداية الموجة اليومية (أقرب مقاومة حالية).
-        2) إن لم توجد: أول مرساة مكسورة بعد بداية الموجة.
-        3) إن لم توجد: أحدث غير مخترقة إجمالاً.
-        4) إن لم توجد إطلاقًا: أقدم مكسورة إجمالاً.
+def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "auto"):
+    """أهداف اليومي باختيار تلقائي ذكي للمرساة (مطابق للشارت).
     يعيد: (H, T1, T2, T3) أو None
     """
     if _df is None or _df.empty:
         return None
     df = _df[["Open", "High", "Low", "Close"]].dropna().copy()
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
-    if not anchors:
-        return None
 
-    def _last_daily_first_buy_index(_df_ohlc: pd.DataFrame) -> int:
-        tmp = detect_breakout_with_state(_df_ohlc.copy(), pct=pct)
-        if tmp is None or tmp.empty or "FirstBuySig" not in tmp.columns:
-            return 0
+    # بداية الموجة = آخر FirstBuySig يومية
+    tmp = detect_breakout_with_state(df.copy(), pct=pct)
+    start_i = 0
+    if tmp is not None and not tmp.empty and "FirstBuySig" in tmp.columns:
         idx = np.where(tmp["FirstBuySig"].to_numpy())[0]
-        return int(idx[-1]) if len(idx) else 0
+        if len(idx): start_i = int(idx[-1])
 
-    pick = None
-    if mode == "first_break":
-        start_i = _last_daily_first_buy_index(df)
-        # 1) أحدث غير مخترقة بعد بداية الموجة
-        unbroken_after = [a for a in anchors if a["t_break"] is None and a["j"] >= start_i]
-        if unbroken_after:
-            pick = max(unbroken_after, key=lambda a: a["j"])  # الأحدث زمنيًا
-        else:
-            # 2) أول مكسورة بعد البداية
-            broken_after = [a for a in anchors if a["t_break"] is not None and a["t_break"] >= start_i]
-            if broken_after:
-                pick = min(broken_after, key=lambda a: a["t_break"])  # أول اختراق بعد البداية
-            else:
-                # 3) أحدث غير مخترقة إجمالاً
-                unbroken = [a for a in anchors if a["t_break"] is None]
-                if unbroken:
-                    pick = max(unbroken, key=lambda a: a["j"]) 
-                else:
-                    # 4) أقدم مكسورة إجمالاً
-                    broken = [a for a in anchors if a["t_break"] is not None]
-                    pick = min(broken, key=lambda a: a["t_break"]) if broken else None
-    else:
-        pick = _select_current_anchor(anchors, mode)
-
+    pick = _select_anchor_auto(anchors, start_i) if mode == "auto" else _select_current_anchor(anchors, mode)
     if (not pick) or (not np.isfinite(pick["R"])) or (pick["R"] <= 0):
         return None
 
@@ -728,31 +723,8 @@ with st.sidebar:
     enable_tick_round = st.checkbox("تقريب الأهداف حسب تيك السعر", value=False, key="tick_round_enable")
     tick_value = st.selectbox("قيمة التيك", [0.01, 0.05, 0.1], index=0, key="tick_value") if enable_tick_round else None
 
-    # 🆕 سياسة اختيار المرساة المستخدمة لحساب الأهداف
-    anchor_policy = st.selectbox(
-        "سياسة اختيار المرساة",
-        [
-            "المقاومة الحالية (غير مخترقة)",
-            "أول اختراق في الموجة (نمط TradingView)",
-            "آخر اختراق تاريخي",
-        ],
-        index=1,  # ⚠️ الافتراضي الآن = أول اختراق في الموجة لمطابقة الشارت
-        help="اختَر القاعدة التي تُحدِّد منها الشمعة البيعية المعتبرة لحساب الأهداف الأسبوعية/اليومية."
-    )
-    _MODE_MAP = {
-        "المقاومة الحالية (غير مخترقة)": "unbroken",
-        "أول اختراق في الموجة (نمط TradingView)": "first_break",
-        "آخر اختراق تاريخي": "last_break",
-    }
-    anchor_mode = _MODE_MAP.get(anchor_policy, "first_break")
-
-    # 🆕 سياسة اليومي مستقلة عن الأسبوعي (إصلاح مطابق لـ TradingView)
-    use_same_policy_daily = st.checkbox("تطبيق نفس السياسة على اليومي", value=False,
-                                      help="إذا لم تُفعّل، سيستخدم اليومي دائمًا المقاومة الحالية (غير مخترقة) لضمان التطابق.")
-    daily_mode = anchor_mode if use_same_policy_daily else "unbroken"
-
-    # 🧪 خيار تشخيصي لإظهار تفاصيل المرساة المختارة
-    show_anchor_debug = st.checkbox("إظهار معلومات المرساة الأسبوعية في الجدول (تشخيص)", value=False)
+    # 🧠 اختيار تلقائي ذكي للمرساة — لا حاجة لمفتاح يدوي
+show_anchor_debug = st.checkbox("إظهار معلومات المرساة الأسبوعية في الجدول (تشخيص)", value=False)"إظهار معلومات المرساة الأسبوعية في الجدول (تشخيص)", value=False)
 
     symbol_name_dict = load_symbols_names("saudiSY.txt","سعودي") if suffix==".SR" else load_symbols_names("usaSY.txt","امريكي")
 
@@ -815,12 +787,12 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
-                    t_w, info_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55, mode=anchor_mode)
+                    t_w, info_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55, mode="auto")
                     if t_w is not None:
                         weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode=daily_mode)
+                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode="auto")
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
                     # 🆕 الدعم الأسبوعي
