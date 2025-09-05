@@ -746,6 +746,11 @@ with st.sidebar:
     }
     anchor_mode = _MODE_MAP.get(anchor_policy, "first_break")
 
+    # 🆕 سياسة اليومي مستقلة عن الأسبوعي (إصلاح مطابق لـ TradingView)
+    use_same_policy_daily = st.checkbox("تطبيق نفس السياسة على اليومي", value=False,
+                                      help="إذا لم تُفعّل، سيستخدم اليومي دائمًا المقاومة الحالية (غير مخترقة) لضمان التطابق.")
+    daily_mode = anchor_mode if use_same_policy_daily else "unbroken"
+
     # 🧪 خيار تشخيصي لإظهار تفاصيل المرساة المختارة
     show_anchor_debug = st.checkbox("إظهار معلومات المرساة الأسبوعية في الجدول (تشخيص)", value=False)
 
@@ -815,7 +820,7 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode=anchor_mode)
+                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode=daily_mode)
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
                     # 🆕 الدعم الأسبوعي
