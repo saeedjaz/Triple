@@ -274,36 +274,67 @@ def _enumerate_sell_anchors_with_break(df: pd.DataFrame, pct: float=0.55):
 
 
 def _select_current_anchor(anchors, mode: str):
-    """اختيار المرساة بحسب سياسة ثابتة (احتياطي).
-    - "unbroken": أحدث مرساة غير مخترقة؛ وإن لم توجد فـ "أول اختراق".
-    - "first_break": أقدم مرساة تم اختراقها؛ وإن لم توجد فـ أحدث غير مخترقة.
-    - "last_break": أحدث مرساة تم اختراقها؛ وإن لم توجد فـ أحدث غير مخترقة.
-    """
+    '''Select anchor by explicit policy with clear fallbacks.'''
     if not anchors:
         return None
     if mode == "unbroken":
         unbroken = [a for a in anchors if a["t_break"] is None]
         if unbroken:
-            return max(unbroken, key=lambda a: a["j"])  # الأحدث زمنيًا من غير المخترقات
+            return max(unbroken, key=lambda a: a["j"])  # latest unbroken
         broken = [a for a in anchors if a["t_break"] is not None]
         return min(broken, key=lambda a: a["t_break"]) if broken else None
-    elif mode == "first_break":
+    if mode == "first_break":
         broken = [a for a in anchors if a["t_break"] is not None]
         if broken:
-            return min(broken, key=lambda a: a["t_break"])  # أول اختراق في الموجة
-        return max(anchors, key=lambda a: a["j"])  # fallback: أحدث غير مخترقة
-    elif mode == "last_break":
+            return min(broken, key=lambda a: a["t_break"])  # earliest break
+        unbroken = [a for a in anchors if a["t_break"] is None]
+        return max(unbroken, key=lambda a: a["j"]) if unbroken else None
+    if mode == "last_break":
         broken = [a for a in anchors if a["t_break"] is not None]
         if broken:
-            return max(broken, key=lambda a: a["t_break"])  # آخر اختراق تاريخي
-        return max(anchors, key=lambda a: a["j"])  # fallback
-    # افتراضيًا: سلوك المقاومة الحالية
+            return max(broken, key=lambda a: a["t_break"])  # latest break
+        unbroken = [a for a in anchors if a["t_break"] is None]
+        return max(unbroken, key=lambda a: a["j"]) if unbroken else None
+    # default fallback ~ unbroken policy
     unbroken = [a for a in anchors if a["t_break"] is None]
     if unbroken:
         return max(unbroken, key=lambda a: a["j"]) 
     broken = [a for a in anchors if a["t_break"] is not None]
     return min(broken, key=lambda a: a["t_break"]) if broken else None
 
+
+def _select_anchor_auto(anchors, start_i: int):
+    '''Automatic smart selection used by TriplePower.
+    Order:
+      1) latest unbroken after start
+      2) earliest broken after start
+      3) latest unbroken overall
+      4) earliest broken overall
+    Returns dict with an extra key `why` explaining choice.
+    '''
+    if not anchors:
+        return None
+    unbroken_after = [a for a in anchors if a["t_break"] is None and a["j"] >= start_i]
+    if unbroken_after:
+        pick = max(unbroken_after, key=lambda a: a["j"])  # closest resistance after start
+        pick["why"] = "current_unbroken_after_start"
+        return pick
+    broken_after = [a for a in anchors if a["t_break"] is not None and a["t_break"] >= start_i]
+    if broken_after:
+        pick = min(broken_after, key=lambda a: a["t_break"])  # first break after start
+        pick["why"] = "first_break_after_start"
+        return pick
+    unbroken_any = [a for a in anchors if a["t_break"] is None]
+    if unbroken_any:
+        pick = max(unbroken_any, key=lambda a: a["j"])  # latest overall unbroken
+        pick["why"] = "latest_unbroken_overall"
+        return pick
+    broken_any = [a for a in anchors if a["t_break"] is not None]
+    if broken_any:
+        pick = min(broken_any, key=lambda a: a["t_break"])  # earliest overall break
+        pick["why"] = "first_break_overall"
+        return pick
+    return None
 
 def _select_anchor_auto(anchors, start_i: int):
     """اختيار ذكي تلقائي وفق مدرسة TriplePower:
