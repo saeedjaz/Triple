@@ -278,8 +278,10 @@ def _select_current_anchor(anchors):
         return None
     unbroken = [a for a in anchors if a["t_break"] is None]
     if unbroken:
+        # الأحدث زمنيًا من غير المخترَقات
         return max(unbroken, key=lambda a: a["j"])  # الأحدث زمنيًا
-    return max(anchors, key=lambda a: a["t_break"])  # آخر مكسور
+    # جميع المراسي مكسورة: نختار **أول اختراق في الموجة** (الأقدم زمنًا)
+    return min(anchors, key=lambda a: a["t_break"])  # أول اختراق
 
 
 def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
