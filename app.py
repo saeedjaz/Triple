@@ -305,7 +305,32 @@ def _select_current_anchor(anchors, mode: str):
     return min(broken, key=lambda a: a["t_break"]) if broken else None
 
 
-def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "unbroken"):
+def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
+    if _df is None or _df.empty:
+        return None, None
+    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
+    pick = _select_current_anchor(anchors, mode)
+    if not pick or not np.isfinite(pick["R"]) or pick["R"] <= 0:
+        return None, None
+    H, R = pick["H"], pick["R"]
+    j = pick["j"]
+    info = {
+        "date": pd.to_datetime(_df.index[j]).date() if "Date" not in _df.columns else pd.to_datetime(_df.loc[j, "Date"]).date(),
+        "H": round(H,2), "L": round(pick["L"],2), "R": round(R,2)
+    }
+    return (
+        round(H, 2),
+        round(H + 1.0*R, 2),
+        round(H + 2.0*R, 2),
+        round(H + 3.0*R, 2)
+    ), info,
+        round(H + 2.0*R, 2),
+        round(H + 3.0*R, 2)
+    )
+
+
+def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
@@ -319,21 +344,7 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, 
         round(H + 1.0*R, 2),
         round(H + 2.0*R, 2),
         round(H + 3.0*R, 2)
-    )
-
-
-def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "unbroken"):
-    if _df is None or _df.empty:
-        return None
-    df = _df[["Open","High","Low","Close"]].dropna().copy()
-    anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
-    pick = _select_current_anchor(anchors, mode)
-    if not pick or not np.isfinite(pick["R"]) or pick["R"] <= 0:
-        return None
-    H, R = pick["H"], pick["R"]
-    return (
-        round(H, 2),
-        round(H + 1.0*R, 2),
+    ),
         round(H + 2.0*R, 2),
         round(H + 3.0*R, 2)
     )
@@ -598,7 +609,7 @@ with st.sidebar:
             "أول اختراق في الموجة (نمط TradingView)",
             "آخر اختراق تاريخي",
         ],
-        index=0,
+        index=1,  # ⚠️ الافتراضي الآن = أول اختراق في الموجة لمطابقة الشارت
         help="اختَر القاعدة التي تُحدِّد منها الشمعة البيعية المعتبرة لحساب الأهداف الأسبوعية/اليومية."
     )
     _MODE_MAP = {
@@ -606,7 +617,10 @@ with st.sidebar:
         "أول اختراق في الموجة (نمط TradingView)": "first_break",
         "آخر اختراق تاريخي": "last_break",
     }
-    anchor_mode = _MODE_MAP.get(anchor_policy, "unbroken")
+    anchor_mode = _MODE_MAP.get(anchor_policy, "first_break")
+
+    # 🧪 خيار تشخيصي لإظهار تفاصيل المرساة المختارة
+    show_anchor_debug = st.checkbox("إظهار معلومات المرساة الأسبوعية في الجدول (تشخيص)", value=False)
 
     symbol_name_dict = load_symbols_names("saudiSY.txt","سعودي") if suffix==".SR" else load_symbols_names("usaSY.txt","امريكي")
 
@@ -669,8 +683,9 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
-                    t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55, mode=anchor_mode)
-                    if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
+                    t_w, info_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55, mode=anchor_mode)
+                    if t_w is not None:
+                        weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
                     t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode=anchor_mode)
@@ -713,7 +728,7 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         else:
                             monthly_text = f"متواجدة بشرط الحفاظ على {last_win_low_val:.2f}"
 
-                    rows.append({
+                    row = {
                         "اسم الشركة": company,
                         "الرمز": sym,
                         "سعر الإغلاق": round(last_close,2),
@@ -727,7 +742,11 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                         "الهدف الثالث (اسبوعي)": weekly_t3,
                         "القوة والتسارع الشهري": monthly_text,
                         "الدعم الاسبوعي": weekly_support if weekly_support is not None else "—",
-                    })
+                    }
+                    if info_w is not None and show_anchor_debug:
+                        row["تاريخ المرساة الأسبوعية"] = str(info_w["date"]) 
+                        row["H/L/R (أسبوعي)"] = f"H={info_w['H']} L={info_w['L']} R={info_w['R']}"
+                    rows.append(row)
 
                 except Exception:
                     continue
@@ -749,8 +768,11 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                 "الهدف الثاني (اسبوعي)",
                 "الهدف الثالث (اسبوعي)",
                 "القوة والتسارع الشهري",
-                "الدعم الاسبوعي",  # ← عمود أخير
+                "الدعم الاسبوعي",
             ]
+            # أضف أعمدة التشخيص إن فُعّلت
+            if show_anchor_debug:
+                columns_order += ["تاريخ المرساة الأسبوعية", "H/L/R (أسبوعي)"]
             df_final = pd.DataFrame(rows)[columns_order]
 
             non_numeric_cols = {"اسم الشركة", "الرمز", "القوة والتسارع الشهري"}
