@@ -273,23 +273,44 @@ def _enumerate_sell_anchors_with_break(df: pd.DataFrame, pct: float=0.55):
     return arr
 
 
-def _select_current_anchor(anchors):
+def _select_current_anchor(anchors, mode: str):
+    """اختيار المرساة بحسب السياسة:
+    - "unbroken": أحدث مرساة غير مخترقة؛ وإن لم توجد فـ "أول اختراق".
+    - "first_break": أقدم مرساة تم اختراقها (أول اختراق في الموجة)؛ وإن لم توجد فـ أحدث غير مخترقة.
+    - "last_break": أحدث مرساة تم اختراقها تاريخيًا؛ وإن لم توجد فـ أحدث غير مخترقة.
+    """
     if not anchors:
         return None
+    if mode == "unbroken":
+        unbroken = [a for a in anchors if a["t_break"] is None]
+        if unbroken:
+            return max(unbroken, key=lambda a: a["j"])  # الأحدث زمنيًا من غير المخترقات
+        broken = [a for a in anchors if a["t_break"] is not None]
+        return min(broken, key=lambda a: a["t_break"]) if broken else None
+    elif mode == "first_break":
+        broken = [a for a in anchors if a["t_break"] is not None]
+        if broken:
+            return min(broken, key=lambda a: a["t_break"])  # أول اختراق في الموجة
+        return max(anchors, key=lambda a: a["j"])  # fallback: أحدث غير مخترقة
+    elif mode == "last_break":
+        broken = [a for a in anchors if a["t_break"] is not None]
+        if broken:
+            return max(broken, key=lambda a: a["t_break"])  # آخر اختراق تاريخي
+        return max(anchors, key=lambda a: a["j"])  # fallback
+    # افتراضيًا: سلوك المقاومة الحالية
     unbroken = [a for a in anchors if a["t_break"] is None]
     if unbroken:
-        # الأحدث زمنيًا من غير المخترَقات
-        return max(unbroken, key=lambda a: a["j"])  # الأحدث زمنيًا
-    # جميع المراسي مكسورة: نختار **أول اختراق في الموجة** (الأقدم زمنًا)
-    return min(anchors, key=lambda a: a["t_break"])  # أول اختراق
+        return max(unbroken, key=lambda a: a["j"]) 
+    broken = [a for a in anchors if a["t_break"] is not None]
+    return min(broken, key=lambda a: a["t_break"]) if broken else None
 
 
-def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
+def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "unbroken"):
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
-    pick = _select_current_anchor(anchors)
+    pick = _select_current_anchor(anchors, mode)
     if not pick or not np.isfinite(pick["R"]) or pick["R"] <= 0:
         return None
     H, R = pick["H"], pick["R"]
@@ -301,12 +322,12 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
     )
 
 
-def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55):
+def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "unbroken"):
     if _df is None or _df.empty:
         return None
     df = _df[["Open","High","Low","Close"]].dropna().copy()
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
-    pick = _select_current_anchor(anchors)
+    pick = _select_current_anchor(anchors, mode)
     if not pick or not np.isfinite(pick["R"]) or pick["R"] <= 0:
         return None
     H, R = pick["H"], pick["R"]
@@ -569,6 +590,24 @@ with st.sidebar:
     enable_tick_round = st.checkbox("تقريب الأهداف حسب تيك السعر", value=False, key="tick_round_enable")
     tick_value = st.selectbox("قيمة التيك", [0.01, 0.05, 0.1], index=0, key="tick_value") if enable_tick_round else None
 
+    # 🆕 سياسة اختيار المرساة المستخدمة لحساب الأهداف
+    anchor_policy = st.selectbox(
+        "سياسة اختيار المرساة",
+        [
+            "المقاومة الحالية (غير مخترقة)",
+            "أول اختراق في الموجة (نمط TradingView)",
+            "آخر اختراق تاريخي",
+        ],
+        index=0,
+        help="اختَر القاعدة التي تُحدِّد منها الشمعة البيعية المعتبرة لحساب الأهداف الأسبوعية/اليومية."
+    )
+    _MODE_MAP = {
+        "المقاومة الحالية (غير مخترقة)": "unbroken",
+        "أول اختراق في الموجة (نمط TradingView)": "first_break",
+        "آخر اختراق تاريخي": "last_break",
+    }
+    anchor_mode = _MODE_MAP.get(anchor_policy, "unbroken")
+
     symbol_name_dict = load_symbols_names("saudiSY.txt","سعودي") if suffix==".SR" else load_symbols_names("usaSY.txt","امريكي")
 
     if st.button("🎯 رموز تجريبية", key="demo_symbols_btn"):
@@ -630,11 +669,11 @@ if st.button("🔎 إنشاء جدول الأهداف (اليومي + الأسب
                     company=(symbol_name_dict.get(sym,"غير معروف") or "غير معروف")[:20]
 
                     weekly_H, weekly_t1, weekly_t2, weekly_t3 = ("—","—","—","—")
-                    t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55)
+                    t_w = weekly_latest_breakout_anchor_targets(df_w, pct=0.55, mode=anchor_mode)
                     if t_w is not None: weekly_H, weekly_t1, weekly_t2, weekly_t3 = t_w
 
                     daily_H, daily_t1, daily_t2, daily_t3 = ("—","—","—","—")
-                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55)
+                    t_d = daily_latest_breakout_anchor_targets(df_d_conf, pct=0.55, mode=anchor_mode)
                     if t_d is not None: daily_H, daily_t1, daily_t2, daily_t3 = t_d
 
                     # 🆕 الدعم الأسبوعي
