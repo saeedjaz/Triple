@@ -393,12 +393,12 @@ def _select_anchor_auto(anchors, start_i: int):
         pick["why"] = "first_break_overall"
         return pick
     return None
-    elif mode == "first_break":
+    if mode == "first_break":
         broken = [a for a in anchors if a["t_break"] is not None]
         if broken:
             return min(broken, key=lambda a: a["t_break"])  # أول اختراق في الموجة
         return max(anchors, key=lambda a: a["j"])  # fallback: أحدث غير مخترقة
-    elif mode == "last_break":
+    if mode == "last_break":
         broken = [a for a in anchors if a["t_break"] is not None]
         if broken:
             return max(broken, key=lambda a: a["t_break"])  # آخر اختراق تاريخي
