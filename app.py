@@ -317,9 +317,10 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, 
     if (not pick) or (not np.isfinite(pick["R"])) or (pick["R"] <= 0):
         return None, None
     H = float(pick["H"])
+    L = float(pick["L"])  # قد نعرضه في التشخيص
     R = float(pick["R"])
-    j = int(pick["j"])  # موضع الشمعة في إطار الأسبوعي
-    # استخراج التاريخ من عمود Date إن وُجد، وإلا من الفهرس
+    j = int(pick["j"])  # موقع الشمعة
+    # استخراج تاريخ الشمعة الأسبوعية
     try:
         if "Date" in _df.columns:
             date_val = pd.to_datetime(_df["Date"].iloc[j]).date()
@@ -330,13 +331,14 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, 
     info = {
         "date": str(date_val) if date_val else None,
         "H": round(H, 2),
-        "L": round(float(pick["L"]), 2),
+        "L": round(L, 2),
         "R": round(R, 2),
     }
     t1 = round(H + 1.0 * R, 2)
     t2 = round(H + 2.0 * R, 2)
     t3 = round(H + 3.0 * R, 2)
     return (round(H, 2), t1, t2, t3), info
+
 
 
 def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
@@ -357,34 +359,27 @@ def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, m
     t3 = round(H + 3.0 * R, 2)
     return (round(H, 2), t1, t2, t3)
 
+
+
 def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
     """ترجيع أهداف اليومي وفق سياسة اختيار المرساة.
     يعيد: (H, T1, T2, T3) أو None
     """
     if _df is None or _df.empty:
         return None
-    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    df = _df[["Open", "High", "Low", "Close"]].dropna().copy()
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
     pick = _select_current_anchor(anchors, mode)
-    if not pick or not np.isfinite(pick["R"]) or pick["R"] <= 0:
+    if (not pick) or (not np.isfinite(pick["R"])) or (pick["R"] <= 0):
         return None
-    H = float(pick["H"]) ; R = float(pick["R"])  
-    targets = (round(H, 2),
-               round(H + 1.0*R, 2),
-               round(H + 2.0*R, 2),
-               round(H + 3.0*R, 2))
-    return targets,
-        round(H + 1.0*R, 2),
-        round(H + 2.0*R, 2),
-        round(H + 3.0*R, 2)
-    ),
-        round(H + 2.0*R, 2),
-        round(H + 3.0*R, 2)
-    )
+    H = float(pick["H"])  
+    R = float(pick["R"])  
+    t1 = round(H + 1.0 * R, 2)
+    t2 = round(H + 2.0 * R, 2)
+    t3 = round(H + 3.0 * R, 2)
+    return (round(H, 2), t1, t2, t3)
 
-# =============================
-# التجميع الأسبوعي/الشهري من اليومي المؤكد
-# =============================
+
 
 def _is_current_week_closed(suffix: str) -> tuple[bool, date]:
     tz = ZoneInfo("Asia/Riyadh" if suffix == ".SR" else "America/New_York")
