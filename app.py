@@ -369,13 +369,60 @@ def weekly_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, 
 
 def daily_latest_breakout_anchor_targets(_df: pd.DataFrame, pct: float = 0.55, mode: str = "first_break"):
     """ترجيع أهداف اليومي وفق سياسة اختيار المرساة.
-    - في وضع "first_break" نقيّد الاختيار بكون الاختراق حدث *بعد آخر إشارة شراء يومية* لبداية الموجة.
+    - في وضع "first_break":
+        1) نفضّل أحدث مرساة غير مخترقة بعد بداية الموجة اليومية (أقرب مقاومة حالية).
+        2) إن لم توجد: أول مرساة مكسورة بعد بداية الموجة.
+        3) إن لم توجد: أحدث غير مخترقة إجمالاً.
+        4) إن لم توجد إطلاقًا: أقدم مكسورة إجمالاً.
     يعيد: (H, T1, T2, T3) أو None
     """
     if _df is None or _df.empty:
         return None
-    df = _df[["Open","High","Low","Close"]].dropna().copy()
+    df = _df[["Open", "High", "Low", "Close"]].dropna().copy()
     anchors = _enumerate_sell_anchors_with_break(df, pct=pct)
+    if not anchors:
+        return None
+
+    def _last_daily_first_buy_index(_df_ohlc: pd.DataFrame) -> int:
+        tmp = detect_breakout_with_state(_df_ohlc.copy(), pct=pct)
+        if tmp is None or tmp.empty or "FirstBuySig" not in tmp.columns:
+            return 0
+        idx = np.where(tmp["FirstBuySig"].to_numpy())[0]
+        return int(idx[-1]) if len(idx) else 0
+
+    pick = None
+    if mode == "first_break":
+        start_i = _last_daily_first_buy_index(df)
+        # 1) أحدث غير مخترقة بعد بداية الموجة
+        unbroken_after = [a for a in anchors if a["t_break"] is None and a["j"] >= start_i]
+        if unbroken_after:
+            pick = max(unbroken_after, key=lambda a: a["j"])  # الأحدث زمنيًا
+        else:
+            # 2) أول مكسورة بعد البداية
+            broken_after = [a for a in anchors if a["t_break"] is not None and a["t_break"] >= start_i]
+            if broken_after:
+                pick = min(broken_after, key=lambda a: a["t_break"])  # أول اختراق بعد البداية
+            else:
+                # 3) أحدث غير مخترقة إجمالاً
+                unbroken = [a for a in anchors if a["t_break"] is None]
+                if unbroken:
+                    pick = max(unbroken, key=lambda a: a["j"]) 
+                else:
+                    # 4) أقدم مكسورة إجمالاً
+                    broken = [a for a in anchors if a["t_break"] is not None]
+                    pick = min(broken, key=lambda a: a["t_break"]) if broken else None
+    else:
+        pick = _select_current_anchor(anchors, mode)
+
+    if (not pick) or (not np.isfinite(pick["R"])) or (pick["R"] <= 0):
+        return None
+
+    H = float(pick["H"])  
+    R = float(pick["R"])  
+    t1 = round(H + 1.0 * R, 2)
+    t2 = round(H + 2.0 * R, 2)
+    t3 = round(H + 3.0 * R, 2)
+    return (round(H, 2), t1, t2, t3)
 
     def _last_daily_first_buy_index(_df_ohlc: pd.DataFrame) -> int:
         tmp = detect_breakout_with_state(_df_ohlc.copy(), pct=pct)
